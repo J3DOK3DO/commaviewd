@@ -139,6 +139,17 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
   -lcapnp -lkj -lpthread -o "$TMP/test_manager_state_peek"
 "$TMP/test_road_phase"
 
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" -I"$ROOT/src" -I"$MSGQ_ROOT_DIR" \
+  "$ROOT/tests/test_process_events.cpp" \
+  "$ROOT/src/process_events.cpp" \
+  "$ROOT/src/process_watch.cpp" \
+  "$ROOT/src/support_bundle.cpp" \
+  "$ROOT/src/manager_state_peek.cpp" \
+  "$ROOT/src/gps_peek.cpp" \
+  "$ROOT/src/msgq_ring_reader.cpp" \
+  "${CEREAL_SRCS[@]}" \
+  -lcapnp -lkj -lpthread -o "$TMP/test_process_events"
+
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
   "$ROOT/tests/test_msgq_header_recovery.cpp" \
   "$DIST_DIR/msgq-commaviewd.cc" \
@@ -170,6 +181,7 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
 "$TMP/test_gps_peek"
 "$TMP/test_support_bundle"
 "$TMP/test_manager_state_peek"
+"$TMP/test_process_events"
 
 "$ROOT/tests/control_mode_api_contract_test.sh"
 "$ROOT/tests/control_mode_pairing_integration_test.sh"

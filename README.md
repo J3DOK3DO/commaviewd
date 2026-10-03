@@ -249,6 +249,7 @@ These are mostly CI-facing but useful for targeted local checks.
 | `commaviewd/tests/msgq_reader_slot_contract_test.sh` | commaviewd creates no msgq subscriber and maps queues read-only. |
 | `commaviewd/tests/test_msgq_ring_reader.cpp` | The slot-free encoder queue reader against real msgq: restarts and reconnects never evict loggerd, a lapped reader resumes on a keyframe, nothing torn; `--cpu-bench IDLE_POLL_US SECONDS` measures its polling. |
 | `commaviewd/tests/runtime_control_integration_test.py` | runtime-debug apply in place (SIGHUP), `roadPhase`, Safe Repair queued while onroad. |
+| `commaviewd/tests/test_process_events.cpp` | The process watcher (`/data/commaview/logs/process-events.jsonl`): managerState transitions, event lines, rotation, `/dev/kmsg` filtering; prints what one tick costs. |
 | `comma/tests/deferred_maintenance_test.py` | `run_when_offroad.sh`: queued maintenance runs only after a stable offroad or parked stretch, never while driving. |
 | `comma/tests/runtime_supervisor_restart_test.py` | `start.sh` restarts a crashed process with a bounded backoff, never a deliberate stop. |
 | `commaviewd/tests/local_discovery_contract_test.sh` | Verifies local discovery responder contract. |

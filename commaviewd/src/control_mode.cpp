@@ -2,6 +2,7 @@
 #include "gps_peek.h"
 #include "http_server.h"
 #include "manager_state_peek.h"
+#include "process_watch.h"
 #include "road_phase.h"
 #include "runtime_debug_config.h"
 #include "source_recording_archive.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
@@ -30,6 +32,7 @@
 #include <unistd.h>
 #include <vector>
 #include <mutex>
+#include <optional>
 #include <ctime>
 #include <thread>
 #include <arpa/inet.h>
@@ -79,6 +82,8 @@ struct SupportLogFileSpec {
 
 std::string msgq_dir();
 std::string swaglog_dir();
+std::string process_events_log_path();
+std::string process_watch_status_json();
 std::string leaderboard_seed_for_redaction();
 
 std::vector<SupportLogFileSpec> support_log_files() {
@@ -94,8 +99,11 @@ std::vector<SupportLogFileSpec> support_log_files() {
       {"last-restart-reason.txt", "/data/commaview/run/last-restart-reason.txt", false},
       // openpilot's side, each capped small: why a process openpilot needs isn't running.
       {"openpilot-manager-state.json", msgq_dir() + "/msgq_managerState", false, SupportLogSource::kManagerState},
+      // What the process watcher wrote down as it happened, kept across reboots (process_watch.h).
+      {"process-events.jsonl", process_events_log_path(), false},
       {"openpilot-process-events.log", swaglog_dir() + "/swaglog.*", false, SupportLogSource::kSwaglog},
       {"kernel-oom-events.log", "dmesg", false, SupportLogSource::kKernelLog},
+      {"process-events.jsonl.1", process_events_log_path() + ".1", true},
       {"runtime-debug-apply.log", "/data/commaview/logs/runtime-debug-apply.log", false},
       {"runtime-run-events.jsonl", "/data/commaview/logs/runtime-run-events.jsonl", false},
       {"commaviewd-bridge.log", "/data/commaview/logs/commaviewd-bridge.log", false},
@@ -357,13 +365,14 @@ SupportLogEntry support_swaglog_entry(const commaview::support::RedactionSecrets
   entry.exists = scan.dir_exists;
   entry.truncated = scan.truncated;
   std::ostringstream out;
-  out << "# openpilot swaglog lines matching process_not_running, \"is dead with\" or killing\n";
+  out << "# openpilot swaglog lines about processes stopping, starting, retrying or failing"
+         " (process_not_running, manager, retries, micd/soundd errors)\n";
   if (!scan.dir_exists) {
     out << "# unavailable: no swaglog directory at " << dir << "\n";
   } else {
-    out << "# scanned the newest " << scan.files_scanned << " of " << scan.files_seen << " swaglog files ("
-        << scan.bytes_scanned << " bytes); " << scan.lines_matched << " matching lines"
-        << (scan.truncated ? ", capped" : "") << "\n";
+    out << "# scanned the newest " << scan.files_scanned << " of " << scan.files_recent
+        << " swaglog files modified in the last 24 h (" << scan.files_seen << " in all; " << scan.bytes_scanned
+        << " bytes); " << scan.lines_matched << " matching lines" << (scan.truncated ? ", capped" : "") << "\n";
   }
   entry.content = out.str() + scan.text;
   return entry;
@@ -706,6 +715,8 @@ std::string runtime_status_json() {
   out << "\"roadPhaseReason\":\"" << json_escape(phase.reason) << "\",";
   // An install, uninstall or repair asked for while driving, waiting for Park (or how it ended).
   out << "\"deferredMaintenance\":" << deferred_maintenance_json() << ",";
+  // openpilot processes down now, and the last one the process watcher saw go down.
+  out << "\"processEvents\":" << process_watch_status_json() << ",";
   // What this runtime can do for a paired phone without SSH.
   out << "\"capabilities\":[\"runtime-update\",\"runtime-uninstall\"],";
   out << "\"onroadUiExport\":" << live_onroad_ui_export_status_json(false) << ",";
@@ -1107,6 +1118,68 @@ std::string msgq_dir() {
   }
 #endif
   return "/dev/shm";
+}
+
+// The process watcher's log (process_watch.h): openpilot's processes going down, and the kernel's
+// memory-pressure kills, as they happen, kept across reboots.
+std::string process_events_log_path() {
+#if !defined(__aarch64__)
+  if (const char* test_path = std::getenv("COMMAVIEWD_TEST_PROCESS_EVENTS_LOG")) {
+    if (*test_path) return test_path;
+  }
+#endif
+  return std::string(kInstallDir) + "/logs/process-events.jsonl";
+}
+
+// COMMAVIEWD_PROCESS_WATCH_MS: how often the watcher looks (500-60000 ms, default 2000); 0 turns it off.
+int process_watch_interval_ms() {
+  constexpr int kDefaultMs = 2000;
+  const char* env = std::getenv("COMMAVIEWD_PROCESS_WATCH_MS");
+  if (env == nullptr || *env == '\0') return kDefaultMs;
+  char* end = nullptr;
+  const long ms = std::strtol(env, &end, 10);
+  if (end == env || *end != '\0' || ms < 0) return kDefaultMs;
+  if (ms == 0) return 0;
+  return static_cast<int>(std::min(60000L, std::max(500L, ms)));
+}
+
+// Set once, before the watcher's thread starts; never freed (it lives as long as control mode).
+std::atomic<commaview::process_events::ProcessWatcher*> g_process_watcher{nullptr};
+
+std::string process_watch_status_json() {
+  const auto* watcher = g_process_watcher.load();
+  if (watcher == nullptr) return "{\"watching\":false}";
+  return commaview::process_events::process_watch_summary_json(watcher->summary());
+}
+
+void start_process_watcher() {
+  const int interval_ms = process_watch_interval_ms();
+  if (interval_ms <= 0) return;
+  commaview::process_events::ProcessWatchConfig config;
+  config.msgq_dir = msgq_dir();
+  config.log_path = process_events_log_path();
+  config.interval_ms = interval_ms;
+#if !defined(__aarch64__)
+  // Host tests never follow the build machine's kernel log, and write only where they say.
+  if (std::getenv("COMMAVIEWD_TEST_MSGQ_DIR") != nullptr) {
+    if (std::getenv("COMMAVIEWD_TEST_PROCESS_EVENTS_LOG") == nullptr) return;
+    config.kmsg_path.clear();
+  }
+#endif
+  config.onroad = []() -> std::optional<bool> { return is_onroad(); };
+  config.road_phase = [](bool onroad) {
+    return std::string(commaview::road::road_phase_name(commaview::road::read_road_phase(onroad, msgq_dir()).phase));
+  };
+  auto* watcher = new commaview::process_events::ProcessWatcher(std::move(config));
+  g_process_watcher.store(watcher);
+  std::thread([interval_ms, watcher] {
+    commaview::process_events::lower_current_thread_priority();
+    watcher->start();
+    while (true) {
+      watcher->tick();
+      std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+  }).detach();
 }
 
 std::string drivelog_path(const std::string& relative) {
@@ -2238,6 +2311,7 @@ int run_control_mode(int argc, char* argv[]) {
   std::fflush(stdout);
   start_discovery_responder();
   start_drive_watcher();
+  start_process_watcher();
 
   server.serve_forever();
   return 0;

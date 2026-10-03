@@ -6,6 +6,7 @@
 // writes anywhere.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace commaview::support {
@@ -36,13 +37,21 @@ std::string mask_identifier(const std::string& id);
 // Linear in the input.
 std::string redact_support_text(const std::string& text, const RedactionSecrets& secrets);
 
-// openpilot's swaglog lines that tell why a process stopped: selfdrived's process_not_running
-// event, and manager's "killing <proc>" and "<proc> is dead with <code>".
+// openpilot's swaglog lines that tell why a process stopped or never ran:
+//  - selfdrived's process_not_running event
+//  - manager's "starting process|python|daemon <proc>", "killing <proc>", "<proc> is dead with <code>"
+//    and "Restarting <proc> (exitcode ...)"
+//  - common.utils.retry's "<fn> failed, trying again" / "failed after retry" (where a fork logs them)
+//  - the audio daemons' (micd, soundd) error and exception lines (levelnum 40 and up, or naming an
+//    error, exception, traceback or failure)
 bool swaglog_line_matches(const std::string& line);
 
 struct SwaglogScanLimits {
-  size_t max_files = 48;                 // newest swaglog.<index> files looked at
-  size_t max_scan_bytes = 8 * 1024 * 1024;
+  // Files modified within this long before now (swaglog rolls over every minute or 256 KiB).
+  int64_t max_age_sec = 24 * 60 * 60;
+  int64_t now_unix_sec = 0;              // 0: the clock's now (tests pin it)
+  size_t max_files = 2500;               // logmessaged keeps at most 2500
+  size_t max_scan_bytes = 16 * 1024 * 1024;
   int max_scan_ms = 1500;
   size_t max_lines = 200;                // newest matching lines kept
   size_t max_line_bytes = 2048;          // per line, after redaction
@@ -53,15 +62,16 @@ struct SwaglogScan {
   std::string text;  // matching lines, oldest first, each redacted then capped
   bool dir_exists = false;
   size_t files_seen = 0;
+  size_t files_recent = 0;  // modified within max_age_sec
   size_t files_scanned = 0;
   size_t bytes_scanned = 0;
   size_t lines_matched = 0;
   bool truncated = false;  // a limit stopped the scan or cut the output
 };
 
-// The newest matching lines of openpilot's swaglog files (dir/swaglog.<index>, a higher index is
-// newer), read newest file first within the limits. Files are opened read-only, never followed
-// through a symlink, and dropped from the page cache after reading.
+// The newest matching lines of openpilot's swaglog files (dir/swaglog.<index>) modified within
+// max_age_sec, read newest first (by modification time, then index) within the limits. Files are
+// opened read-only, never followed through a symlink, and dropped from the page cache after reading.
 SwaglogScan scan_swaglog(const std::string& dir, const RedactionSecrets& secrets,
                          const SwaglogScanLimits& limits = SwaglogScanLimits());
 

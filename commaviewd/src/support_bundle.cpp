@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <utility>
 #include <vector>
@@ -593,30 +594,71 @@ std::string redact_support_text(const std::string& in, const RedactionSecrets& s
 }
 
 bool swaglog_line_matches(const std::string& line) {
-  return contains_ci(line, "process_not_running") || contains_ci(line, "is dead with") ||
-         contains_ci(line, "killing");
+  // Lowered once, then searched with memmem: a support bundle scans megabytes of these.
+  thread_local std::string lower;
+  lower.assign(line);
+  for (char& c : lower) c = to_lower(c);
+  const auto has = [](const char* needle) {
+    return memmem(lower.data(), lower.size(), needle, std::strlen(needle)) != nullptr;
+  };
+  for (const char* needle : {"process_not_running", "is dead with", "killing", "starting process ", "starting python ",
+                             "starting daemon ", "restarting ", "failed, trying again", "failed after retry"}) {
+    if (has(needle)) return true;
+  }
+  // The audio daemons (micd, soundd): their errors, not their routine info and warnings.
+  if (!has("micd") && !has("soundd")) return false;
+  const char* levelnum = static_cast<const char*>(memmem(lower.data(), lower.size(), "\"levelnum\"", 10));
+  if (levelnum != nullptr) {
+    const char* p = levelnum + 10;
+    const char* end = lower.data() + lower.size();
+    while (p < end && (*p == ':' || *p == ' ')) p++;
+    int level = 0;
+    while (p < end && is_digit(*p) && level < 1000) level = level * 10 + (*p++ - '0');
+    if (level >= 40) return true;
+  }
+  return has("error") || has("exception") || has("traceback") || has("failed");
 }
+
+namespace {
+
+struct SwaglogFile {
+  std::string name;
+  int64_t mtime_ns = 0;
+};
+
+}  // namespace
 
 SwaglogScan scan_swaglog(const std::string& dir, const RedactionSecrets& secrets, const SwaglogScanLimits& limits) {
   SwaglogScan scan;
   DIR* d = opendir(dir.c_str());
   if (d == nullptr) return scan;
   scan.dir_exists = true;
-  std::vector<std::string> names;
+  const int64_t now_sec = limits.now_unix_sec > 0 ? limits.now_unix_sec : static_cast<int64_t>(std::time(nullptr));
+  const int64_t oldest_ns = (now_sec - limits.max_age_sec) * 1000000000LL;
+  std::vector<SwaglogFile> files;
   while (const dirent* entry = readdir(d)) {
-    if (is_swaglog_name(entry->d_name)) names.emplace_back(entry->d_name);
+    if (!is_swaglog_name(entry->d_name)) continue;
+    scan.files_seen++;
+    struct stat st {};
+    if (fstatat(dirfd(d), entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+    const int64_t mtime_ns = static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
+    if (mtime_ns < oldest_ns) continue;
+    files.push_back({entry->d_name, mtime_ns});
   }
   closedir(d);
-  scan.files_seen = names.size();
-  // Newest first: the index only grows (zero-padded, but compare as numbers anyway).
-  std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
-    return a.size() != b.size() ? a.size() > b.size() : a > b;
+  scan.files_recent = files.size();
+  // Newest first: by modification time, then by index (it only grows; zero-padded, but compared
+  // as numbers anyway).
+  std::sort(files.begin(), files.end(), [](const SwaglogFile& a, const SwaglogFile& b) {
+    if (a.mtime_ns != b.mtime_ns) return a.mtime_ns > b.mtime_ns;
+    return a.name.size() != b.name.size() ? a.name.size() > b.name.size() : a.name > b.name;
   });
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(limits.max_scan_ms);
   std::vector<std::vector<std::string>> per_file;  // newest file first, each file's lines in order
   size_t kept = 0;
-  for (const auto& name : names) {
+  for (const auto& file : files) {
+    const std::string& name = file.name;
     if (kept >= limits.max_lines || scan.files_scanned >= limits.max_files ||
         scan.bytes_scanned >= limits.max_scan_bytes || std::chrono::steady_clock::now() >= deadline) {
       scan.truncated = true;

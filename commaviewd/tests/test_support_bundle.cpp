@@ -3,6 +3,7 @@
 // openpilot's swaglog files is read.
 #include "support_bundle.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -137,6 +138,25 @@ void swaglog(const std::string& root) {
   check(swaglog_line_matches("{\"msg$s\": \"modeld is dead with -9\"}"), "is dead with matches");
   check(swaglog_line_matches("{\"msg$s\": \"killing camerad with SIGKILL\"}"), "killing matches");
   check(!swaglog_line_matches("{\"msg$s\": \"modeld started\"}"), "other lines don't match");
+  check(swaglog_line_matches("{\"msg\": \"starting process micd\", \"level\": \"INFO\", \"levelnum\": 20}"),
+        "manager starting lines match");
+  check(swaglog_line_matches("{\"msg\": \"Restarting soundd (exitcode -11)\", \"levelnum\": 40}"),
+        "restart_if_crash lines match");
+  check(swaglog_line_matches("{\"msg\": \"init_stream failed, trying again\"}") &&
+            swaglog_line_matches("{\"msg\": \"init_stream failed after retry\"}"),
+        "retry lines match");
+  check(swaglog_line_matches("{\"msg\": \"PortAudioError: device unavailable\", \"ctx\": {\"daemon\": \"micd\"}, "
+                             "\"level\": \"ERROR\", \"levelnum\": 40}"),
+        "micd errors match");
+  check(swaglog_line_matches("{\"msg\": \"stream gone\", \"ctx\": {\"daemon\": \"soundd\"}, \"levelnum\": 50}"),
+        "soundd critical lines match");
+  check(!swaglog_line_matches("{\"msg\": \"soundd stream over/underflow: input underflow\", \"ctx\": {\"daemon\": "
+                              "\"soundd\"}, \"level\": \"WARNING\", \"levelnum\": 30}"),
+        "audio daemons' warnings don't match");
+  check(!swaglog_line_matches("{\"msg\": \"micd stream started\", \"ctx\": {\"daemon\": \"micd\"}, \"levelnum\": 20}"),
+        "audio daemons' info lines don't match");
+  check(!swaglog_line_matches("{\"msg\": \"error reading can\", \"ctx\": {\"daemon\": \"pandad\"}, \"levelnum\": 40}"),
+        "other daemons' errors are not widened");
 
   RedactionSecrets secrets;
   secrets.dongle_id = "0123456789abcdef";
@@ -194,6 +214,42 @@ void swaglog(const std::string& root) {
   tiny_scan.max_scan_bytes = 40;
   const auto tail_only = scan_swaglog(dir, secrets, tiny_scan);
   check(tail_only.truncated && tail_only.bytes_scanned <= 40, "the byte budget bounds what is read");
+
+  // By time: files modified in the last 24 h, newest modification first, whatever their index.
+  const std::string timed = root + "/timed";
+  mkdir(timed.c_str(), 0755);
+  const int64_t now = 2000000000;
+  const auto touch = [&](const std::string& name, const std::string& body, int64_t age_sec) {
+    write_text(timed + "/" + name, body);
+    timespec times[2] = {{static_cast<time_t>(now - age_sec), 0}, {static_cast<time_t>(now - age_sec), 0}};
+    check(utimensat(AT_FDCWD, (timed + "/" + name).c_str(), times, 0) == 0, "mtime set");
+  };
+  touch("swaglog.0000000001", "{\"msg\": \"micd is dead with -9 (yesterday)\"}\n", 30 * 3600);
+  touch("swaglog.0000000002", "{\"msg\": \"starting process micd\"}\n", 3 * 3600);
+  touch("swaglog.0000000003", "{\"msg\": \"killing soundd\"}\n", 2 * 3600);
+  // A higher index written earlier (a clock jump): the modification time decides.
+  touch("swaglog.0000000004", "{\"msg\": \"init_stream failed, trying again\"}\n", 4 * 3600);
+  SwaglogScanLimits day;
+  day.now_unix_sec = now;
+  const auto recent = scan_swaglog(timed, secrets, day);
+  check(recent.files_seen == 4 && recent.files_recent == 3 && recent.files_scanned == 3 && recent.lines_matched == 3,
+        "only files from the last 24 h are read: seen " + std::to_string(recent.files_seen) + ", recent " +
+            std::to_string(recent.files_recent));
+  check(!has(recent.text, "yesterday"), "an older file is left out");
+  const size_t retry = recent.text.find("trying again");
+  const size_t starting = recent.text.find("starting process micd");
+  const size_t killing = recent.text.find("killing soundd");
+  check(retry != std::string::npos && starting != std::string::npos && killing != std::string::npos &&
+            retry < starting && starting < killing,
+        "oldest modification first in the output:\n" + recent.text);
+  SwaglogScanLimits newest_only = day;
+  newest_only.max_files = 1;
+  const auto one = scan_swaglog(timed, secrets, newest_only);
+  check(one.files_scanned == 1 && has(one.text, "killing soundd") && one.truncated,
+        "the newest by modification time is read first");
+  SwaglogScanLimits week = day;
+  week.max_age_sec = 7 * 24 * 3600;
+  check(scan_swaglog(timed, secrets, week).files_recent == 4, "the window is a limit");
 }
 
 void kernel() {

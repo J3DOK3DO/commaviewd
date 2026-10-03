@@ -149,6 +149,8 @@ unixTimestampMillis
 managerState
 shouldBeRunning
 exitCode
+deviceState
+started
 struct SelfdriveState {
   state @0 :OpenpilotState;
   enabled @1 :Bool;

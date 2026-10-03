@@ -179,6 +179,9 @@ required_capnp_fields=(
   managerState
   shouldBeRunning
   exitCode
+  # The process watcher (src/process_watch.cpp) notes deviceState.started with each event.
+  deviceState
+  started
 )
 
 for field in "${required_capnp_fields[@]}"; do

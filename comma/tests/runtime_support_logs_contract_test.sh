@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTROL="$ROOT/commaviewd/src/control_mode.cpp"
 SUPPORT="$ROOT/commaviewd/src/support_bundle.cpp"
 MANAGER_STATE="$ROOT/commaviewd/src/manager_state_peek.cpp"
+WATCH="$ROOT/commaviewd/src/process_watch.cpp"
+EVENTS="$ROOT/commaviewd/src/process_events.cpp"
 
 require_literal() {
   local needle="$1"
@@ -82,5 +84,24 @@ require_literal 'commaview::gps::QueuePeek' "$MANAGER_STATE"
 for needle in 'socket(' 'connect(' 'curl' 'http://' 'https://'; do
   forbid_literal "$needle" 'support bundle code must not send anything anywhere' "$SUPPORT" "$MANAGER_STATE"
 done
+
+# The process watcher's log is in the bundle, beside the swaglog scan.
+require_literal '"process-events.jsonl", process_events_log_path()'
+require_literal '"process-events.jsonl.1", process_events_log_path() + ".1"'
+require_literal 'start_process_watcher();'
+
+# The watcher only looks: it peeks managerState and deviceState without a reader slot, never
+# signals or writes to anything of openpilot's, never syncs, and runs at the lowest priority.
+require_literal 'commaview::gps::QueuePeek' "$WATCH"
+require_literal 'SCHED_IDLE' "$WATCH"
+require_literal 'SYS_ioprio_set' "$WATCH"
+for needle in 'SubSocket' 'SubMaster' 'msgq_init_subscriber' 'subscribe(' 'O_RDWR' 'PROT_WRITE' 'kill(' 'sigqueue' \
+              'fsync' 'fdatasync' 'sync_file_range' 'socket(' 'connect(' 'system(' 'popen(' 'fork(' 'exec'; do
+  forbid_literal "$needle" 'the process watcher only reads openpilot state and appends to its own log' "$WATCH" "$EVENTS"
+done
+# /dev/kmsg is only read, from where it ends: never the whole ring, never cleared.
+require_literal 'O_RDONLY | O_NONBLOCK | O_CLOEXEC' "$EVENTS"
+require_literal 'lseek(fd_, 0, SEEK_END)' "$EVENTS"
+require_literal 'O_APPEND' "$EVENTS"
 
 echo "PASS: runtime support logs endpoint contract"

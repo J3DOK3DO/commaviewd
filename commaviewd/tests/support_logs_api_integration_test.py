@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The support bundle, end to end: GET /commaview/support/logs answers only a paired phone, and
 gathers openpilot's process state (managerState, read without subscribing), the swaglog lines
-about stopped or killed processes and the kernel's out-of-memory lines at request time, capped and
-redacted before they leave the comma.
+about stopped or killed processes and the kernel's out-of-memory lines at request time, plus the
+process watcher's log of what went down as it happened, capped and redacted before they leave the
+comma.
 """
 
 import json
@@ -89,15 +90,23 @@ def main():
             "<3>[ 812.1] Out of memory: Killed process 4242 (modeld) total-vm:1834000kB\n")
         if queue_tool:
             subprocess.check_call([queue_tool, "--write-manager-state-queue", str(msgq / "msgq_managerState")])
+        # The process watcher's log from before a reboot: kept, and redacted on the way out like the rest.
+        events_log = root / "install" / "logs" / "process-events.jsonl"
+        events_log.parent.mkdir(parents=True)
+        events_log.with_name("process-events.jsonl.1").write_text(json.dumps(
+            {"t": 1727830000000, "event": "kernel", "line": f"Killed process 77 (micd) dongle_id={DONGLE} from 8.8.8.8"}) + "\n")
 
         env = dict(os.environ, COMMAVIEWD_TEST_PARAMS_DIR=str(params), COMMAVIEWD_TEST_MSGQ_DIR=str(msgq),
                    COMMAVIEWD_TEST_SWAGLOG_DIR=str(swaglog), COMMAVIEWD_TEST_KERNEL_LOG_FILE=str(kernel_log),
                    COMMAVIEWD_TEST_DATA_ROOT=str(root / "install"), COMMAVIEWD_TEST_LIVE_DIR=str(root / "live"),
-                   COMMAVIEWD_TEST_MEM_PARAMS_DIR=str(root / "shm-params"))
+                   COMMAVIEWD_TEST_MEM_PARAMS_DIR=str(root / "shm-params"),
+                   COMMAVIEWD_TEST_PROCESS_EVENTS_LOG=str(events_log), COMMAVIEWD_PROCESS_WATCH_MS="500")
 
         # A runtime without an API token (never paired) hands its logs to no one.
         port = free_port()
-        unpaired = start_control(binary, dict(env, COMMAVIEWD_API_TOKEN_FILE=str(root / "missing.token")), port)
+        unpaired_env = dict(env, COMMAVIEWD_API_TOKEN_FILE=str(root / "missing.token"))
+        del unpaired_env["COMMAVIEWD_TEST_PROCESS_EVENTS_LOG"]  # no watcher: its log is for the run below
+        unpaired = start_control(binary, unpaired_env, port)
         try:
             assert request(port, "/commaview/support/logs")[0] == 401
         finally:
@@ -108,6 +117,18 @@ def main():
         try:
             assert request(port, "/commaview/support/logs")[0] == 401
             assert request(port, "/commaview/support/logs", token="wrong")[0] == 401
+            # The watcher's first look at the (stale) process table: modeld and camerad down, manager silent.
+            watch = {}
+            for _ in range(40):
+                watch = request(port, "/commaview/status")[1]["processEvents"]
+                if not queue_tool or watch.get("events", 0) >= 3:
+                    break
+                time.sleep(0.1)
+            assert watch["watching"] is True and watch["intervalMs"] == 500 and watch["kernelLog"] is False, watch
+            if queue_tool:
+                assert watch["downCount"] == 2 and watch["down"] == ["modeld", "camerad"], watch
+                assert watch["managerSilent"] is True and watch["lastEvent"]["event"] == "manager-silent", watch
+
             status, body = request(port, "/commaview/support/logs", token="test-token-1234567890")
             assert status == 200 and body["ok"] is True, body
             assert "public-ip" in body["redacted"] and "gps" in body["redacted"], body["redacted"]
@@ -143,6 +164,20 @@ def main():
                 assert "controlsd" not in stuck, state
             else:
                 assert manager["exists"] is False and state["available"] is False, state
+
+            events = files["process-events.jsonl"]
+            if queue_tool:
+                lines = [json.loads(line) for line in events["content"].splitlines()]
+                kinds = [(line["event"], line.get("proc")) for line in lines]
+                assert kinds == [("watch-start", None), ("down-first-seen", "modeld"), ("down-first-seen", "camerad"),
+                                 ("manager-silent", None)], kinds
+                assert lines[1]["exitCode"] == -9 and lines[1]["exitSignal"] == 9, lines
+                assert lines[1]["down"] == ["modeld", "camerad"], lines
+                assert lines[1]["onroad"] is False and lines[1]["phase"] == "offroad", lines
+            previous = files["process-events.jsonl.1"]
+            assert previous["exists"] is True and "Killed process 77 (micd)" in previous["content"], previous
+            assert "8.8.8.8" not in previous["content"] and "******abcdef" in previous["content"], previous
+            assert names.index("process-events.jsonl") < names.index("runtime-run-events.jsonl"), names
 
             # Nothing private in the whole response, whatever file it came from.
             raw = json.dumps(body)
