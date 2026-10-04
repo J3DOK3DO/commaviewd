@@ -182,6 +182,9 @@ required_capnp_fields=(
   # The process watcher (src/process_watch.cpp) notes deviceState.started with each event.
   deviceState
   started
+  # The road phase (src/road_phase.cpp) tells no car from a car by how long openpilot has been
+  # onroad: deviceState.startedMonoTime.
+  startedMonoTime
 )
 
 for field in "${required_capnp_fields[@]}"; do
