@@ -100,6 +100,11 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   "$ROOT/src/source_recording_archive.cpp" \
   -o "$TMP/test_source_recording_archive"
 
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
+  "$ROOT/tests/test_recording_records.cpp" \
+  "$ROOT/src/recording_records.cpp" \
+  -o "$TMP/test_recording_records"
+
 # The generated cereal sources the build step just wrote, for tests that read real events.
 CEREAL_SRCS=( "$OP_SOURCE_ROOT/cereal/gen/cpp/log.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/car.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/custom.capnp.c++" )
 for legacy in deprecated legacy; do
@@ -176,6 +181,7 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
 "$TMP/test_http_server_cloexec"
 "$TMP/test_ui_export_socket"
 "$TMP/test_source_recording_archive"
+"$TMP/test_recording_records"
 "$TMP/test_msgq_header_recovery"
 "$TMP/test_msgq_ring_reader"
 "$TMP/test_gps_peek"
@@ -190,6 +196,7 @@ python3 "$ROOT/tests/wifi_power_save_api_integration_test.py"
 COMMAVIEWD_ROAD_QUEUE_TOOL="$TMP/test_road_phase" python3 "$ROOT/tests/runtime_control_integration_test.py"
 COMMAVIEWD_GPS_QUEUE_TOOL="$TMP/test_gps_peek" python3 "$ROOT/tests/drive_stats_api_integration_test.py"
 python3 "$ROOT/tests/leaderboard_api_integration_test.py"
+python3 "$ROOT/tests/recording_records_api_integration_test.py"
 "$ROOT/tests/leaderboard_contract_test.sh"
 COMMAVIEWD_MANAGER_STATE_QUEUE_TOOL="$TMP/test_manager_state_peek" python3 "$ROOT/tests/support_logs_api_integration_test.py"
 "$ROOT/tests/local_discovery_contract_test.sh"
