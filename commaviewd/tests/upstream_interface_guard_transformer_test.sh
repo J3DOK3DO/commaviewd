@@ -151,6 +151,7 @@ shouldBeRunning
 exitCode
 deviceState
 started
+startedMonoTime
 struct SelfdriveState {
   state @0 :OpenpilotState;
   enabled @1 :Bool;

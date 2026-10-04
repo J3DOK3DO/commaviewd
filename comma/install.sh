@@ -321,7 +321,8 @@ read_is_onroad() {
 }
 
 # Prints 1 while the car is being driven: onroad and not parked. Parked is in Park, at a standstill
-# and not engaged (sunnypilot's MADS included), as commaviewd road-phase reads it from openpilot's
+# and not engaged (sunnypilot's MADS included), or no car at all (onroad 30 s with no carState,
+# as a bench supply or harness box does), as commaviewd road-phase reads it from openpilot's
 # queues without subscribing. A runtime without road-phase, or one that can't tell, leaves onroad
 # as driving.
 ROAD_PHASE_BIN="${COMMAVIEWD_ROAD_PHASE_BIN:-${INSTALL_DIR:-/data/commaview}/commaviewd}"

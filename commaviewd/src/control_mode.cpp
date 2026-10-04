@@ -733,7 +733,8 @@ std::string runtime_status_json() {
   out << "\"isOnroad\":" << (onroad ? "true" : "false") << ",";
   out << "\"onroad\":" << (onroad ? "true" : "false") << ",";
   // roadState stays onroad/offroad (openpilot's own IsOffroad). roadPhase splits onroad into
-  // parked (in Park, at a standstill, not engaged) and driving; anything uncertain is driving.
+  // parked (in Park, at a standstill, not engaged; or no car at all, "no-car") and driving;
+  // anything uncertain is driving. road_phase.h has the rules.
   const auto phase = commaview::road::read_road_phase(onroad, msgq_dir());
   out << "\"roadPhase\":\"" << commaview::road::road_phase_name(phase.phase) << "\",";
   out << "\"roadPhaseReason\":\"" << json_escape(phase.reason) << "\",";
@@ -908,7 +909,8 @@ bool is_onroad() {
 }
 
 // Maintenance (install, update, uninstall, repair) never runs while the car is being driven: it
-// may run offroad, or parked (in Park, at a standstill, not engaged). Anything uncertain is driving.
+// may run offroad, or parked (in Park, at a standstill, not engaged; or no car at all). Anything
+// uncertain is driving.
 bool being_driven() {
   const bool onroad = is_onroad();
   if (!onroad) return false;

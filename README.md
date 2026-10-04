@@ -43,7 +43,7 @@ commaviewd --help
 | --- | --- | --- |
 | `bridge` | none currently | Starts video + telemetry bridge. Runtime debug behavior is configured through JSON/env files, not CLI flags. |
 | `control` | `--port <port>` | Starts local control API. Defaults to the built-in API port when omitted. |
-| `road-phase` | none | Prints `offroad`, `parked` or `driving` and why (`parked parked`, `driving engaged`, ...), then exits: 0 when maintenance may run (offroad, or parked), 1 while driving. Reads openpilot's queues without subscribing; the maintenance scripts below use it as their gate. |
+| `road-phase` | none | Prints `offroad`, `parked` or `driving` and why (`parked parked`, `parked no-car`, `driving engaged`, ...), then exits: 0 when maintenance may run (offroad, or parked), 1 while driving. Reads openpilot's queues without subscribing; the maintenance scripts below use it as their gate. |
 | `--help`, `-h`, `help` | n/a | Prints mode usage. |
 
 Runtime env used by installed scripts:
@@ -100,7 +100,11 @@ Installing, updating, uninstalling and repairing the UI export restart the runti
 openpilot's UI files (which its running UI never reloads), so they never run while the car is being
 driven: they run while openpilot is offroad (`IsOffroad` is `1`), or while it is onroad but parked
 (in Park, at a standstill, openpilot not engaged (sunnypilot's MADS steering may stay on), as `commaviewd road-phase`
-reads it; a runtime without `road-phase` counts onroad as driving). Asked for while driving, they
+reads it; a runtime without `road-phase` counts onroad as driving). A comma onroad with no car at all
+(a bench power supply or harness box reporting ignition, so openpilot starts but never gets a
+`carState`) is parked too (`parked no-car`) once openpilot has been onroad 30 s, is not engaged and
+its GPS shows no movement; before that it is `driving car-state-missing`. A `carState` this onroad
+session, even a stale one, means a car, and the rules above decide. Asked for while driving, they
 exit 42 (refused), or with `--force-offroad` (the app's Safe Update / Safe Repair) they are queued
 and the command exits 75 after printing `COMMAVIEW_MAINTENANCE_DEFERRED=<action>`.
 `comma/scripts/run_when_offroad.sh` keeps the queue in `/data/commaview-deferred` (one job; a new

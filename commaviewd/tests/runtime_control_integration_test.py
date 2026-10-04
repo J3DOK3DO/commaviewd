@@ -170,6 +170,31 @@ def main():
                 assert phase("park", "1", "0", "2000")["roadPhaseReason"] == "car-state-stale"
                 assert road_phase_cli()[0] == 1
                 print("PASS: /commaview/status and commaviewd road-phase report offroad / parked / driving")
+
+                # No car: onroad (a bench supply or harness box turning the ignition on) and card
+                # never publishes a carState. Early on that is still driving; once openpilot has
+                # been onroad 30 s without one, not engaged and the GPS still, it is parked.
+                (msgq / "msgq_carState").unlink()
+                (msgq / "msgq_selfdriveState").unlink()
+                def started(ago_ms):
+                    subprocess.run([road_tool, "--write-device-state", str(msgq), str(ago_ms)], check=True)
+                    return request(port, "/commaview/status")[1]
+                early = started(10_000)
+                assert early["roadPhase"] == "driving" and early["roadPhaseReason"] == "car-state-missing", early
+                assert road_phase_cli() == (1, "driving car-state-missing")
+                no_car = started(40_000)
+                assert no_car["roadPhase"] == "parked" and no_car["roadPhaseReason"] == "no-car", no_car
+                assert no_car["roadState"] == "onroad", no_car
+                assert road_phase_cli() == (0, "parked no-car")
+                subprocess.run([road_tool, "--write-gps", str(msgq), "9.5"], check=True)
+                moving = request(port, "/commaview/status")[1]
+                assert moving["roadPhase"] == "driving" and moving["roadPhaseReason"] == "moving", moving
+                subprocess.run([road_tool, "--write-gps", str(msgq), "0"], check=True)
+                assert road_phase_cli() == (0, "parked no-car")
+                # A carState this session that stopped is the car: stale, driving (as below).
+                assert phase("park", "1", "0", "2000")["roadPhaseReason"] == "car-state-stale"
+                assert road_phase_cli()[0] == 1
+                print("PASS: onroad with no car at all (no carState) is parked after 30 s, driving before")
             else:
                 print("SKIP: roadPhase from queues (set COMMAVIEWD_ROAD_QUEUE_TOOL)")
 

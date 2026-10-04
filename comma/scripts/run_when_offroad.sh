@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs CommaView maintenance that restarts the runtime or changes openpilot's files (install,
 # update, uninstall, onroad UI export repair) only while the car isn't being driven: openpilot
-# offroad, or parked (in Park, at a standstill, openpilot and sunnypilot's MADS not engaged).
+# offroad, or parked (in Park, at a standstill, openpilot and sunnypilot's MADS not engaged; or
+# onroad with no car at all, which road-phase reports as "parked no-car").
 #
 # Asked for while driving, the job is queued instead, and a small waiter runs it once openpilot's
 # manager is up and either IsOffroad has read 1 for STABLE_SEC in a row or commaviewd road-phase

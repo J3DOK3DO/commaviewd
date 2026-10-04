@@ -3,7 +3,9 @@
 //
 // --write-road-queues DIR GEAR STANDSTILL ENABLED [AGE_MS] writes msgq_carState and
 // msgq_selfdriveState queue files laid out by this build's own msgq and schema (GEAR is unknown,
-// park or drive), for the control API's integration tests.
+// park or drive), for the control API's integration tests. --write-device-state DIR STARTED_AGO_MS
+// writes msgq_deviceState with openpilot started that long ago, and --write-gps DIR SPEED_MS a
+// fresh gpsLocationExternal fix at that speed.
 #include "road_phase.h"
 
 #include <capnp/dynamic.h>
@@ -23,6 +25,7 @@
 #include "msgq/msgq.h"
 
 using commaview::road::CarSample;
+using commaview::road::GpsSample;
 using commaview::road::RoadPhase;
 using commaview::road::RoadPhaseInputs;
 using commaview::road::SelfdriveSample;
@@ -92,6 +95,29 @@ std::vector<uint8_t> selfdrive_event(bool enabled, uint64_t mono_ns) {
   return bytes_of(builder);
 }
 
+std::vector<uint8_t> device_event(uint64_t started_mono_ns, uint64_t mono_ns) {
+  capnp::MallocMessageBuilder builder;
+  auto event = builder.initRoot<cereal::Event>();
+  event.setLogMonoTime(mono_ns);
+  auto device = event.initDeviceState();
+  device.setStarted(started_mono_ns != 0);
+  device.setStartedMonoTime(started_mono_ns);
+  return bytes_of(builder);
+}
+
+std::vector<uint8_t> gps_event(float speed_ms, uint64_t mono_ns) {
+  capnp::MallocMessageBuilder builder;
+  auto event = builder.initRoot<cereal::Event>();
+  event.setLogMonoTime(mono_ns);
+  auto gps = event.initGpsLocationExternal();
+  gps.setLatitude(37.7749);
+  gps.setLongitude(-122.4194);
+  gps.setHasFix(true);
+  gps.setSpeed(speed_ms);
+  gps.setUnixTimestampMillis(1780000000000);
+  return bytes_of(builder);
+}
+
 RoadPhaseInputs parked_inputs(uint64_t now) {
   RoadPhaseInputs in;
   in.onroad = true;
@@ -145,10 +171,97 @@ void test_decisions() {
   in.selfdrive.reset();
   check(decide_road_phase(in).phase == RoadPhase::kDriving, "no selfdriveState is driving");
 
+  // The in-car rules don't change once openpilot's start time is known.
+  in = parked_inputs(now);
+  in.started_mono_ns = now - 40'000'000'000ULL;
+  check(decide_road_phase(in).reason == "parked", "a car in Park, started 40 s ago, is parked");
+  in.car->in_park = false;
+  check(decide_road_phase(in).reason == "not-in-park", "a car in Drive, started 40 s ago, is driving");
+  in = parked_inputs(now);
+  in.started_mono_ns = now - 40'000'000'000ULL;
+  in.car->log_mono_ns = now - 1'500'000'000;
+  check(decide_road_phase(in).reason == "car-state-stale", "a carState this session that stopped is stale, never no car");
+  in = parked_inputs(now);
+  in.started_mono_ns = now - 40'000'000'000ULL;
+  in.gps = GpsSample{now, 20.0f};
+  check(decide_road_phase(in).reason == "parked", "with a carState the GPS isn't asked");
+
   // sunnypilot: its always-on steering (MADS) may stay on; disengaged and in Park is parked.
   in = parked_inputs(now);
   in.selfdrive->enabled = false;
   check(decide_road_phase(in).phase == RoadPhase::kParked, "disengaged in Park is parked, whatever MADS says");
+}
+
+// No car: onroad (a bench supply or harness box turning the ignition on) with no carState at all.
+RoadPhaseInputs no_car_inputs(uint64_t now) {
+  RoadPhaseInputs in;
+  in.onroad = true;
+  in.now_mono_ns = now;
+  in.started_mono_ns = now - 40'000'000'000ULL;
+  return in;
+}
+
+void test_no_car() {
+  using commaview::road::decide_road_phase;
+  const uint64_t now = 100ULL * 1000 * 1000 * 1000;
+
+  auto reading = decide_road_phase(no_car_inputs(now));
+  check(reading.phase == RoadPhase::kParked && reading.reason == "no-car",
+        "no carState, started 40 s ago, not engaged, no GPS: no car, parked");
+
+  auto in = no_car_inputs(now);
+  in.selfdrive = SelfdriveSample{now - 10'000'000, false};
+  in.gps = GpsSample{now - 500'000'000, 0.3f};
+  check(decide_road_phase(in).reason == "no-car", "disengaged and a still GPS fix: no car");
+
+  in = no_car_inputs(now);
+  in.started_mono_ns = now - 10'000'000'000ULL;
+  reading = decide_road_phase(in);
+  check(reading.phase == RoadPhase::kDriving && reading.reason == "car-state-missing",
+        "started 10 s ago: card may not have published yet, driving");
+
+  in = no_car_inputs(now);
+  in.started_mono_ns.reset();
+  check(decide_road_phase(in).reason == "car-state-missing", "no start time is never long enough");
+
+  in = no_car_inputs(now);
+  in.started_mono_ns = 0;
+  check(decide_road_phase(in).reason == "car-state-missing", "a start time of 0 is not started");
+
+  in = no_car_inputs(now);
+  in.started_mono_ns = now + 1'000'000'000ULL;
+  check(decide_road_phase(in).reason == "car-state-missing", "a start time after now is not long enough");
+
+  in = no_car_inputs(now);
+  in.selfdrive = SelfdriveSample{now - 10'000'000, true};
+  check(decide_road_phase(in).reason == "engaged", "no carState but engaged is driving");
+
+  in = no_car_inputs(now);
+  in.selfdrive = SelfdriveSample{now - 60'000'000'000ULL, true};
+  check(decide_road_phase(in).reason == "no-car", "an engaged selfdriveState from before this session says nothing");
+
+  in = no_car_inputs(now);
+  in.gps = GpsSample{now - 500'000'000, 8.0f};
+  reading = decide_road_phase(in);
+  check(reading.phase == RoadPhase::kDriving && reading.reason == "moving", "no carState but the GPS moving is driving");
+
+  in = no_car_inputs(now);
+  in.gps = GpsSample{now - 10'000'000'000ULL, 8.0f};
+  check(decide_road_phase(in).reason == "no-car", "an old GPS fix says nothing about now");
+
+  // The carState queue outlives card: one from an earlier session is no carState this session.
+  in = no_car_inputs(now);
+  in.car = CarSample{now - 60'000'000'000ULL, true, false, false};
+  check(decide_road_phase(in).reason == "no-car", "a carState from before this session is none");
+  in.started_mono_ns = now - 10'000'000'000ULL;
+  check(decide_road_phase(in).reason == "car-state-missing", "...and early in the session still driving");
+
+  // A carState this session, however old, is the car: stale is driving, never no car.
+  in = no_car_inputs(now);
+  in.car = CarSample{now - 20'000'000'000ULL, true, true, true};
+  in.selfdrive = SelfdriveSample{now - 10'000'000, false};
+  reading = decide_road_phase(in);
+  check(reading.phase == RoadPhase::kDriving && reading.reason == "car-state-stale", "a stale carState this session is driving");
 }
 
 void test_events() {
@@ -157,6 +270,12 @@ void test_events() {
   const auto sample = commaview::road::car_sample_from_event(car.data(), car.size());
   check(sample && sample->gear_known && sample->in_park && sample->standstill && sample->log_mono_ns == now,
         "carState gear, standstill and time are read");
+  const auto device = device_event(now - 5, now);
+  const auto started = commaview::road::started_mono_from_event(device.data(), device.size());
+  check(started && *started == now - 5, "deviceState.startedMonoTime is read");
+  const auto offroad_device = device_event(0, now);
+  check(!commaview::road::started_mono_from_event(offroad_device.data(), offroad_device.size()),
+        "a deviceState not started has no start time");
   const auto sd = selfdrive_event(true, now);
   const auto sd_sample = commaview::road::selfdrive_sample_from_event(sd.data(), sd.size());
   check(sd_sample && sd_sample->enabled, "selfdriveState.enabled is read");
@@ -184,6 +303,26 @@ void test_from_queues() {
   write_queue(dir + "/msgq_selfdriveState", {selfdrive_event(true, now)});
   check(read_road_phase(true, dir).reason == "engaged", "engaged from the queue is driving");
 
+  // No car: no carState queue at all, deviceState and GPS from their queues.
+  std::remove((dir + "/msgq_carState").c_str());
+  std::remove((dir + "/msgq_selfdriveState").c_str());
+  write_queue(dir + "/msgq_deviceState", {device_event(now - 10'000'000'000ULL, now)});
+  check(read_road_phase(true, dir).reason == "car-state-missing", "no carState, started 10 s ago, is driving");
+  write_queue(dir + "/msgq_deviceState", {device_event(now - 40'000'000'000ULL, now)});
+  auto no_car = read_road_phase(true, dir);
+  check(no_car.phase == RoadPhase::kParked && no_car.reason == "no-car", "no carState, started 40 s ago, is no car");
+  write_queue(dir + "/msgq_gpsLocationExternal", {gps_event(10.0f, now_ns())});
+  check(read_road_phase(true, dir).reason == "moving", "the GPS moving from its queue is driving");
+  write_queue(dir + "/msgq_gpsLocationExternal", {gps_event(0.0f, now_ns())});
+  check(read_road_phase(true, dir).reason == "no-car", "a still GPS fix from its queue is no car");
+  write_queue(dir + "/msgq_selfdriveState", {selfdrive_event(true, now)});
+  check(read_road_phase(true, dir).reason == "engaged", "engaged with no carState is driving");
+  write_queue(dir + "/msgq_selfdriveState", {selfdrive_event(false, now)});
+  write_queue(dir + "/msgq_carState", {car_event(cereal::CarState::GearShifter::PARK, true, now - 60'000'000'000ULL)});
+  check(read_road_phase(true, dir).reason == "no-car", "a carState left from an earlier session is no carState");
+  write_queue(dir + "/msgq_carState", {car_event(cereal::CarState::GearShifter::PARK, true, now - 2'000'000'000ULL)});
+  check(read_road_phase(true, dir).reason == "car-state-stale", "a carState this session that stopped is stale");
+
   std::string cleanup = "rm -rf '" + dir + "'";
   if (std::system(cleanup.c_str()) != 0) std::fprintf(stderr, "warning: could not remove %s\n", dir.c_str());
 }
@@ -199,7 +338,17 @@ int main(int argc, char** argv) {
     write_queue(dir + "/msgq_selfdriveState", {selfdrive_event(std::string(argv[5]) == "1", at)});
     return 0;
   }
+  if (argc >= 4 && std::string(argv[1]) == "--write-device-state") {
+    const uint64_t at = now_ns();
+    write_queue(std::string(argv[2]) + "/msgq_deviceState", {device_event(at - std::strtoull(argv[3], nullptr, 10) * 1000000ULL, at)});
+    return 0;
+  }
+  if (argc >= 4 && std::string(argv[1]) == "--write-gps") {
+    write_queue(std::string(argv[2]) + "/msgq_gpsLocationExternal", {gps_event(std::strtof(argv[3], nullptr), now_ns())});
+    return 0;
+  }
   test_decisions();
+  test_no_car();
   test_events();
   test_from_queues();
   if (failures == 0) std::printf("PASS: road phase (offroad / parked / driving) read without subscribing\n");

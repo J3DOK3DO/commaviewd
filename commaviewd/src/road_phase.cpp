@@ -34,10 +34,35 @@ auto with_event(const uint8_t* data, size_t size, Fn fn) -> decltype(fn(std::dec
   }
 }
 
-bool fresh(uint64_t log_mono_ns, uint64_t now_ns) {
+bool fresh(uint64_t log_mono_ns, uint64_t now_ns, uint64_t within_ns = kRoadPhaseFreshNs) {
   if (log_mono_ns == 0) return false;
-  if (log_mono_ns >= now_ns) return log_mono_ns - now_ns <= kRoadPhaseFreshNs;
-  return now_ns - log_mono_ns <= kRoadPhaseFreshNs;
+  if (log_mono_ns >= now_ns) return log_mono_ns - now_ns <= within_ns;
+  return now_ns - log_mono_ns <= within_ns;
+}
+
+// The queue outlives card: a carState from before this onroad session says nothing about it.
+bool car_this_session(const RoadPhaseInputs& in) {
+  if (!in.car) return false;
+  return !(in.started_mono_ns && *in.started_mono_ns != 0 && in.car->log_mono_ns < *in.started_mono_ns);
+}
+
+// No carState this onroad session: onroad long enough for card to have published one, not
+// engaged, and the GPS showing no movement is no car (a bench supply or harness box turning the
+// ignition on). Anything short of that is driving, as it always was.
+RoadPhaseReading without_car_state(const RoadPhaseInputs& in) {
+  const auto driving = [](const char* why) { return RoadPhaseReading{RoadPhase::kDriving, why}; };
+  const bool started_long_enough = in.started_mono_ns && *in.started_mono_ns != 0 &&
+                                   in.now_mono_ns >= *in.started_mono_ns &&
+                                   in.now_mono_ns - *in.started_mono_ns >= kNoCarAfterStartNs;
+  if (!started_long_enough) return driving("car-state-missing");
+  if (in.gps && fresh(in.gps->log_mono_ns, in.now_mono_ns, kGpsFreshNs) && in.gps->speed_ms > kGpsMovingMs) {
+    return driving("moving");
+  }
+  // Missing is not engaged; an engaged selfdriveState from an earlier session says nothing now.
+  if (in.selfdrive && in.selfdrive->enabled && in.selfdrive->log_mono_ns >= *in.started_mono_ns) {
+    return driving("engaged");
+  }
+  return {RoadPhase::kParked, "no-car"};
 }
 
 template <typename Decode>
@@ -73,6 +98,15 @@ std::optional<CarSample> car_sample_from_event(const uint8_t* data, size_t size)
   });
 }
 
+std::optional<uint64_t> started_mono_from_event(const uint8_t* data, size_t size) {
+  return with_event(data, size, [](cereal::Event::Reader event) -> std::optional<uint64_t> {
+    if (!event.isDeviceState()) return std::nullopt;
+    const uint64_t started = event.getDeviceState().getStartedMonoTime();
+    if (started == 0) return std::nullopt;
+    return started;
+  });
+}
+
 std::optional<SelfdriveSample> selfdrive_sample_from_event(const uint8_t* data, size_t size) {
   return with_event(data, size, [](cereal::Event::Reader event) -> std::optional<SelfdriveSample> {
     if (!event.isSelfdriveState()) return std::nullopt;
@@ -86,7 +120,7 @@ std::optional<SelfdriveSample> selfdrive_sample_from_event(const uint8_t* data, 
 RoadPhaseReading decide_road_phase(const RoadPhaseInputs& in) {
   if (!in.onroad) return {RoadPhase::kOffroad, "offroad"};
   const auto driving = [](const char* why) { return RoadPhaseReading{RoadPhase::kDriving, why}; };
-  if (!in.car) return driving("car-state-missing");
+  if (!car_this_session(in)) return without_car_state(in);
   if (!fresh(in.car->log_mono_ns, in.now_mono_ns)) return driving("car-state-stale");
   if (!in.car->gear_known) return driving("gear-unknown");
   if (!in.car->in_park) return driving("not-in-park");
@@ -105,7 +139,15 @@ RoadPhaseReading read_road_phase(bool onroad, const std::string& msgq_dir) {
   if (onroad) {
     in.car = peek(msgq_dir + "/msgq_carState", car_sample_from_event);
     in.selfdrive = peek(msgq_dir + "/msgq_selfdriveState", selfdrive_sample_from_event);
+    in.started_mono_ns = peek(msgq_dir + "/msgq_deviceState", started_mono_from_event);
     in.now_mono_ns = monotonic_ns();
+    // The GPS only matters when there is no carState this session.
+    if (!car_this_session(in)) {
+      for (const char* queue : {"/msgq_gpsLocationExternal", "/msgq_gpsLocation"}) {
+        const auto fix = peek(msgq_dir + queue, commaview::gps::fix_from_event);
+        if (fix && (!in.gps || fix->log_mono_ns > in.gps->log_mono_ns)) in.gps = GpsSample{fix->log_mono_ns, fix->speed_ms};
+      }
+    }
   }
   return decide_road_phase(in);
 }
