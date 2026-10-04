@@ -11,7 +11,12 @@
 # for CommaView, and a job that finds the car being driven when it starts (exit 42) waits again.
 #
 # One job at a time: queueing replaces the job that was waiting. The queue lives outside the
-# install directory, so an install or uninstall can replace /data/commaview under it.
+# install directory, so an install or uninstall can replace /data/commaview under it. One waiter at
+# a time (waiter.lock), and the job runs under the maintenance lock (maint.lock) that a direct
+# install, uninstall or repair takes too, so they never interleave.
+#
+# A queued install reports its stage in progress.json beside status.json (install.sh writes it);
+# queueing a job clears it, and a finished job's last stage stays for the app to read.
 #
 #   run_when_offroad.sh queue ACTION [--file PATH]... -- COMMAND [ARG]...
 #       Queue COMMAND (ACTION names it in the status: install, uninstall, repair). Each --file is
@@ -38,6 +43,11 @@ RUNNER="$STATE_DIR/runner.sh"
 STATUS="$STATE_DIR/status.json"
 LOG="$STATE_DIR/deferred.log"
 LOG_MAX_BYTES=262144
+PROGRESS="$STATE_DIR/progress.json"
+WAITER_LOCK="$STATE_DIR/waiter.lock"
+MAINT_LOCK="${COMMAVIEWD_MAINT_LOCK:-$STATE_DIR/maint.lock}"
+WAITER_LOCK_FD=""
+MAINT_LOCK_FD=""
 
 now_ms() {
   local s ns
@@ -125,6 +135,51 @@ maintenance_phase() {
   fi
 }
 
+# The waiter keeps none of the descriptors it was started with: whoever queued the job (an install
+# holding the maintenance lock, commaviewd's sockets) must not stay held by it.
+release_inherited_fds() {
+  local fd
+  unset COMMAVIEWD_MAINT_LOCK_HELD COMMAVIEWD_MAINT_LOCK_FD
+  for fd in /proc/"$BASHPID"/fd/*; do
+    fd="${fd##*/}"
+    case "$fd" in
+      0|1|2|255|*[!0-9]*) continue ;;
+    esac
+    eval "exec $fd>&-" 2>/dev/null
+  done
+}
+
+# Runs a command without the waiter's lock descriptors (the waiter itself keeps them), so nothing
+# the job starts, such as a runtime, holds a lock after the waiter is gone.
+without_lock_fds() {
+  (
+    [ -n "$WAITER_LOCK_FD" ] && exec {WAITER_LOCK_FD}>&-
+    [ -n "$MAINT_LOCK_FD" ] && exec {MAINT_LOCK_FD}>&-
+    "$@"
+  )
+}
+
+nap() {
+  without_lock_fds sleep "$POLL_SEC"
+}
+
+# The maintenance lock for the job, without waiting: busy (an install run directly, say), the job
+# waits for the next poll. Without flock it runs unlocked, as before.
+take_job_lock() {
+  command -v flock >/dev/null 2>&1 || return 0
+  { exec {MAINT_LOCK_FD}>>"$MAINT_LOCK"; } 2>/dev/null || { MAINT_LOCK_FD=""; return 0; }
+  flock -n "$MAINT_LOCK_FD" && return 0
+  exec {MAINT_LOCK_FD}>&-
+  MAINT_LOCK_FD=""
+  return 1
+}
+
+release_job_lock() {
+  [ -n "$MAINT_LOCK_FD" ] || return 0
+  exec {MAINT_LOCK_FD}>&-
+  MAINT_LOCK_FD=""
+}
+
 waiter_pid() {
   local pid cmd
   pid="$(tr -d '\r\n' < "$STATE_DIR/waiter.pid" 2>/dev/null)"
@@ -181,6 +236,7 @@ cmd_queue() {
   fi
   stop_waiter
   rm -rf "$JOB_DIR"
+  rm -f "$PROGRESS"
   mkdir -p "$JOB_DIR" || return 1
   # The waiter runs from its own copy: an install or uninstall replaces the scripts it came from.
   if [ "$(readlink -f "${BASH_SOURCE[0]}")" != "$(readlink -f "$RUNNER" 2>/dev/null)" ]; then
@@ -208,6 +264,17 @@ cmd_queue() {
 }
 
 cmd_wait() {
+  release_inherited_fds
+  # Two waiters (two resumes at once, a queue racing a resume) would run the job twice: the second
+  # exits here. It waits a little for one being replaced, which queue has just stopped.
+  if command -v flock >/dev/null 2>&1 && { exec {WAITER_LOCK_FD}>>"$WAITER_LOCK"; } 2>/dev/null; then
+    if ! flock -w 15 "$WAITER_LOCK_FD"; then
+      log "another waiter is running; this one exits"
+      return 0
+    fi
+  else
+    WAITER_LOCK_FD=""
+  fi
   echo "$$" > "$STATE_DIR/waiter.pid"
   local stable=0 attempts ec action phase prev_phase="" needed
   local -a args=()
@@ -224,23 +291,32 @@ cmd_wait() {
     needed="$STABLE_SEC"
     [ "$phase" = "parked" ] && needed="$PARKED_STABLE_SEC"
     if [ "$phase" = "driving" ] || [ "$stable" -lt "$needed" ]; then
-      sleep "$POLL_SEC"
+      nap
+      continue
+    fi
+    action="$(job_value action)"
+    if ! take_job_lock; then
+      log "another CommaView install, uninstall or repair is running; $action waits for it"
+      nap
       continue
     fi
     mapfile -t -d '' args < "$JOB_DIR/args"
-    action="$(job_value action)"
     attempts="$(job_value attempts)"
     attempts=$(( ${attempts:-0} + 1 ))
     echo "$attempts" > "$JOB_DIR/attempts"
     now_ms > "$JOB_DIR/started_at_ms"
+    rm -f "$PROGRESS"
     write_status running
     log "running $action while $phase (attempt $attempts): ${args[*]}"
-    ( cd / && COMMAVIEWD_DEFERRED_JOB=1 "${args[@]}" ) >> "$LOG" 2>&1
+    # The job holds the lock through this waiter: it's told so, and inherits no lock descriptor.
+    ( cd / && COMMAVIEWD_DEFERRED_JOB=1 COMMAVIEWD_MAINT_LOCK_HELD=1 without_lock_fds "${args[@]}" ) >> "$LOG" 2>&1
     ec=$?
+    release_job_lock
     now_ms > "$JOB_DIR/finished_at_ms"
     if [ "$ec" = "42" ] && [ "$attempts" -lt "$MAX_ATTEMPTS" ]; then
       # The car was being driven again just as it started: wait for the next parked stretch.
       log "$action found the car being driven (exit 42); waiting again"
+      rm -f "$PROGRESS"
       write_status waiting "$ec"
       rm -f "$JOB_DIR/started_at_ms" "$JOB_DIR/finished_at_ms"
       stable=0
@@ -286,6 +362,7 @@ cmd_cancel() {
     # run that called this supersedes it, so the comma stops reporting it.
     rm -f "$STATUS"
   fi
+  rm -f "$PROGRESS"
   rm -f "$STATE_DIR/waiter.pid"
 }
 

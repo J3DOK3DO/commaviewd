@@ -371,6 +371,7 @@ template_present=false
 smoke_script_present=false
 payload_smoke_passed=false
 critical_services_publishable=false
+patched_files_compile=false
 service_send_count=0
 fingerprint=""
 service_marker_count=0
@@ -411,7 +412,9 @@ else
   fi
 
   [ -f "$HELPER_PATH" ] && helper_present=true || true
-  check_fixed 'from openpilot.selfdrive.ui.commaview_export import _CommaViewSocketExporter, COMMAVIEW_RUNTIME_FLAVOR' "$UI_STATE_PATH" && ui_state_hook_present=true || true
+  # The import is guarded so openpilot's UI loads even when the exporter can't.
+  check_fixed 'from openpilot.selfdrive.ui.commaview_export import _CommaViewSocketExporter, COMMAVIEW_RUNTIME_FLAVOR' "$UI_STATE_PATH" && \
+    check_fixed '_CommaViewSocketExporter = None' "$UI_STATE_PATH" && ui_state_hook_present=true || true
   check_fixed "COMMAVIEW_RUNTIME_FLAVOR = \"$expected_runtime_flavor\"" "$HELPER_PATH" && runtime_flavor_constant_present=true || true
   check_fixed 'COMMAVIEW_SOCKET_PATH_DEFAULT = "/data/commaview/run/ui-export.sock"' "$HELPER_PATH" && socket_path_present=true || true
   check_fixed 'os.environ.get("COMMAVIEWD_UI_EXPORT_SOCKET") or COMMAVIEW_SOCKET_PATH_DEFAULT' "$HELPER_PATH" && socket_env_present=true || true
@@ -488,9 +491,47 @@ else
     fi
   done
 
+  # Every file openpilot's UI imports must compile, checked in memory (py_compile would leave a
+  # .pyc in openpilot's tree). A file whose HEAD copy doesn't compile under this python3 either
+  # (one older than openpilot's) isn't held against the patch.
+  compile_targets=("$HELPER_PATH" "$UI_STATE_PATH" "${AUGMENTED_ROAD_PATHS[@]}")
+  if python3 - "$OP_ROOT" "${compile_targets[@]}" <<'PYCOMPILE'
+import os
+import subprocess
+import sys
+
+op_root = sys.argv[1]
+ok = True
+for path in sys.argv[2:]:
+    if not os.path.isfile(path):
+        continue
+    try:
+        with open(path, encoding="utf-8") as source:
+            compile(source.read(), path, "exec")
+        continue
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        pass
+    rel = os.path.relpath(path, op_root)
+    head = subprocess.run(["git", "-C", op_root, "cat-file", "-p", f"HEAD:./{rel}"],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    try:
+        if head.returncode != 0:
+            raise ValueError("not in HEAD")
+        compile(head.stdout.decode("utf-8"), path, "exec")
+    except (SyntaxError, ValueError, UnicodeDecodeError):
+        continue
+    print(f"does not compile: {rel}", file=sys.stderr)
+    ok = False
+sys.exit(0 if ok else 1)
+PYCOMPILE
+  then
+    patched_files_compile=true
+  fi
+
   smoke_json="{}"
   if $helper_present && [ -f "$SMOKE_SCRIPT" ]; then
-    smoke_json="$(python3 "$SMOKE_SCRIPT" "$HELPER_PATH" "$expected_runtime_flavor" 2>/dev/null || true)"
+    # No .pyc left in openpilot's tree beside the helper.
+    smoke_json="$(PYTHONDONTWRITEBYTECODE=1 python3 "$SMOKE_SCRIPT" "$HELPER_PATH" "$expected_runtime_flavor" 2>/dev/null || true)"
     smoke_eval="$(SMOKE_JSON="$smoke_json" python3 - <<'PYSMOKE'
 import json
 import os
@@ -515,7 +556,7 @@ PYSMOKE
      $framing_present && $compact_json_present && $payload_helpers_present && $publish_paths_present && \
      $risk_fields_present && $legacy_bucket_markers_absent && $exporter_install_present && \
      $exporter_publish_present && $onroad_camera_relay_present && $onroad_projection_present && \
-     $payload_smoke_passed && $critical_services_publishable; then
+     $payload_smoke_passed && $critical_services_publishable && $patched_files_compile; then
     if [ -z "$applied_upstream_head" ]; then
       state="repair-needed"
       reason="source transformer socket UI export markers verified but patch provenance is missing; rerun repair against the current upstream checkout"
@@ -598,6 +639,7 @@ json="$(
   SMOKE_SCRIPT_PRESENT="$smoke_script_present" \
   PAYLOAD_SMOKE_PASSED="$payload_smoke_passed" \
   CRITICAL_SERVICES_PUBLISHABLE="$critical_services_publishable" \
+  PATCHED_FILES_COMPILE="$patched_files_compile" \
   SERVICE_SEND_COUNT="$service_send_count" \
   SERVICE_MARKER_COUNT="$service_marker_count" \
   UPSTREAM_HEAD="$upstream_head_value" \
@@ -726,6 +768,7 @@ payload = {
     "smokeScriptPresent": env_bool("SMOKE_SCRIPT_PRESENT"),
     "payloadSmokePassed": env_bool("PAYLOAD_SMOKE_PASSED"),
     "criticalServicesPublishable": env_bool("CRITICAL_SERVICES_PUBLISHABLE"),
+    "patchedFilesCompile": env_bool("PATCHED_FILES_COMPILE"),
     "serviceSendCount": env_int("SERVICE_SEND_COUNT"),
     "serviceMarkerCount": env_int("SERVICE_MARKER_COUNT"),
     "upstreamHead": os.environ.get("UPSTREAM_HEAD", ""),

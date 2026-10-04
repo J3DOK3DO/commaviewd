@@ -151,7 +151,8 @@ HttpServer::~HttpServer() {
 }
 
 bool HttpServer::start(std::string* error) {
-  server_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  // Close-on-exec from the start: a helper forked by another thread meanwhile must not inherit :5002.
+  server_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (server_fd_ < 0) {
     if (error) *error = "socket failed";
     return false;
@@ -196,7 +197,9 @@ void HttpServer::serve_forever() {
   while (running_) {
     sockaddr_in peer{};
     socklen_t peer_len = sizeof(peer);
-    int client_fd = ::accept(server_fd_, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    // Close-on-exec: a helper started while answering (an install, the deferred queue's waiter)
+    // must not keep the app's connection open.
+    int client_fd = ::accept4(server_fd_, reinterpret_cast<sockaddr*>(&peer), &peer_len, SOCK_CLOEXEC);
     if (client_fd < 0) {
       if (running_) std::perror("accept");
       continue;

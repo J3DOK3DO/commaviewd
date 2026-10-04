@@ -22,12 +22,19 @@ read_param() {
 }
 
 # openpilot and sunnypilot publish IsOffroad; IsOnroad stays a fallback for older builds and bench
-# rigs. Prints 1 when onroad.
+# rigs. Prints 1 when onroad. Anything uncertain is onroad: only a machine without openpilot's
+# params at all (a bench or CI checkout) reads offroad when neither param says.
 read_is_onroad() {
   case "$(read_param IsOffroad)" in
     0) echo 1 ;;
     1) echo 0 ;;
-    *) if [ "$(read_param IsOnroad)" = "1" ]; then echo 1; else echo 0; fi ;;
+    *)
+      case "$(read_param IsOnroad)" in
+        1) echo 1 ;;
+        0) echo 0 ;;
+        *) if [ -d "$PARAMS_DIR" ]; then echo 1; else echo 0; fi ;;
+      esac
+      ;;
   esac
 }
 
@@ -60,6 +67,23 @@ if [ "$(read_is_driving)" = "1" ]; then
   fi
   echo "ERROR: uninstall blocked while driving. Shift into Park (openpilot not engaged), or rerun with --force-offroad to uninstall once it is parked." >&2
   exit 42
+fi
+
+MAINT_LOCK="${COMMAVIEWD_MAINT_LOCK:-$DEFERRED_DIR/maint.lock}"
+# One CommaView maintenance at a time (install, uninstall, the onroad UI export patch and its revert,
+# the deferred queue's job). A queued uninstall already holds the lock and says so in the environment.
+take_maint_lock() {
+  [ "${COMMAVIEWD_MAINT_LOCK_HELD:-0}" = "1" ] && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$MAINT_LOCK")" 2>/dev/null || return 0
+  { exec {MAINT_LOCK_FD}>>"$MAINT_LOCK"; } 2>/dev/null || return 0
+  flock -w "$1" "$MAINT_LOCK_FD" || return 1
+  export COMMAVIEWD_MAINT_LOCK_HELD=1 COMMAVIEWD_MAINT_LOCK_FD="$MAINT_LOCK_FD"
+}
+
+if ! take_maint_lock "${COMMAVIEWD_MAINT_LOCK_WAIT_SEC:-120}"; then
+  echo "ERROR: another CommaView install, uninstall or repair is running; try again when it has finished" >&2
+  exit 1
 fi
 
 revert_args=()

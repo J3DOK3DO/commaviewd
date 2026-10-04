@@ -100,7 +100,11 @@ def main():
                    COMMAVIEWD_TEST_SWAGLOG_DIR=str(swaglog), COMMAVIEWD_TEST_KERNEL_LOG_FILE=str(kernel_log),
                    COMMAVIEWD_TEST_DATA_ROOT=str(root / "install"), COMMAVIEWD_TEST_LIVE_DIR=str(root / "live"),
                    COMMAVIEWD_TEST_MEM_PARAMS_DIR=str(root / "shm-params"),
-                   COMMAVIEWD_TEST_PROCESS_EVENTS_LOG=str(events_log), COMMAVIEWD_PROCESS_WATCH_MS="500")
+                   COMMAVIEWD_TEST_PROCESS_EVENTS_LOG=str(events_log), COMMAVIEWD_PROCESS_WATCH_MS="500",
+                   COMMAVIEWD_DEFERRED_DIR=str(root / "deferred"))
+        # What an install, uninstall or repair that waited for Park did.
+        (root / "deferred").mkdir()
+        (root / "deferred" / "deferred.log").write_text("2026-10-04T12:00:00Z install finished: exit 1\n")
 
         # A runtime without an API token (never paired) hands its logs to no one.
         port = free_port()
@@ -137,6 +141,8 @@ def main():
             for name in ("openpilot-manager-state.json", "openpilot-process-events.log", "kernel-oom-events.log",
                          "runtime-debug-apply.log", "telemetry-stats.json", "commaviewd-control.log"):
                 assert name in files, (name, names)
+            deferred = files["deferred-maintenance.log"]
+            assert deferred["exists"] is True and "install finished: exit 1" in deferred["content"], deferred
             # The small openpilot sections come before CommaView's rolling logs, so the total cap can't drop them.
             assert names.index("kernel-oom-events.log") < names.index("runtime-run-events.jsonl"), names
 

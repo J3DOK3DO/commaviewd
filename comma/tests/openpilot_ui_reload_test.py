@@ -97,6 +97,7 @@ def run_script(script: Path, install_dir: Path, op_root: Path, *args: str, **env
         "HOME": os.environ.get("HOME", "/tmp"),
         "COMMAVIEWD_INSTALL_DIR": str(install_dir),
         "COMMAVIEWD_OP_ROOT": str(op_root),
+        "COMMAVIEWD_MAINT_LOCK": str(install_dir.parent / "maint.lock"),
         **env,
     }
     return subprocess.run(["bash", str(script), *args], env=full_env, text=True,

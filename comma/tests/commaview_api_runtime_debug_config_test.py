@@ -186,25 +186,24 @@ def test_install_script_rolls_back_managed_src_tree():
     assert deploy_body.index('mkdir -p "$INSTALL_DIR/src"') < deploy_body.index('copy_required_file "src/commaview_export.openpilot.py"')
 
 
-def test_install_script_failed_rollback_copy_preserves_backup_and_skips_restart():
+def test_install_script_failed_rollback_copy_keeps_backup_and_skips_restart():
     text = INSTALL_SH.read_text()
     restore_body = _shell_function_body(text, "restore_previous_install_tree")
-    preserve_body = _shell_function_body(text, "preserve_install_rollback_backup")
+    backup_body = _shell_function_body(text, "backup_managed_install_tree")
     cleanup_body = _shell_function_body(text, "cleanup")
 
-    assert 'INSTALL_ROLLBACK_BACKUP_ROOT="${COMMAVIEWD_INSTALL_ROLLBACK_BACKUP_ROOT:-$BACKUP_ROOT/install-rollback}"' in text
+    # The backup lives on /data (a power loss empties /tmp) and is synced before anything is removed.
     assert 'BACKUP_ROOT="${COMMAVIEWD_BACKUP_ROOT:-/data/commaview-backups}"' in text
-    assert 'preserved_dir="$(mktemp -d "$INSTALL_ROLLBACK_BACKUP_ROOT/$(date -u +%Y%m%d-%H%M%S).XXXXXX")" || return $?' in preserve_body
-    assert 'cp -a "$backup_dir"/. "$preserved_dir"/ || return $?' in preserve_body
-    assert "printf '%s\\n' \"$preserved_dir\" || return $?" in preserve_body
-    assert 'PRESERVE_TMPDIR=1' in restore_body
-    assert 'keeping temporary backup at $backup_dir' in restore_body
+    assert 'INSTALL_BACKUP_ROOT="${COMMAVIEWD_INSTALL_BACKUP_ROOT:-$BACKUP_ROOT/install-previous}"' in text
+    assert 'mktemp -d "$INSTALL_BACKUP_ROOT/' in backup_body
+    assert "sync" in backup_body
     assert 'if [ "$PRESERVE_TMPDIR" = "1" ]' in cleanup_body
 
     assert 'cp -a "$backup_dir"/. "$INSTALL_DIR"/ 2>/dev/null || true' not in restore_body
     assert not re.search(r'cp -a "\$backup_dir"/\. "\$INSTALL_DIR"/[^\n]*\|\|\s*true', restore_body)
     assert 'if cp -a "$backup_dir"/. "$INSTALL_DIR"/; then' in restore_body
     assert 'return "$restore_ec"' in restore_body
+    assert "the backup stays there for recovery" in restore_body
 
     restore_copy = restore_body.index('if cp -a "$backup_dir"/. "$INSTALL_DIR"/; then')
     restore_failure_return = restore_body.index('return "$restore_ec"')
@@ -258,37 +257,51 @@ cleanup
     assert order_file.read_text().splitlines() == ["revert", "restore-install"]
 
 
-def test_preserve_install_rollback_backup_returns_nonzero_when_copy_fails_under_command_substitution(tmp_path):
+def test_install_backup_and_rollback_put_the_previous_release_back_whole(tmp_path):
     text = INSTALL_SH.read_text()
-    function_definition = _shell_function_definition(text, "preserve_install_rollback_backup")
-    bad_backup = tmp_path / "not-a-directory"
-    bad_backup.touch()
-    rollback_root = tmp_path / "rollback-root"
+    functions = "\n".join(_shell_function_definition(text, name) for name in (
+        "low_priority", "without_maint_lock_fd", "backup_managed_install_tree", "clean_managed_install_tree",
+        "restore_previous_install_tree", "prune_install_backups"))
+    install_dir = tmp_path / "commaview"
+    for rel, body in {"commaviewd": "old binary", "install.sh": "old installer", "start.sh": "exit 0",
+                      "vendor/orjson.py": "old vendor", "scripts/apply.sh": "old apply", "run/car-identity.json": "{}",
+                      "run/bridge.pid": "123"}.items():
+        (install_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (install_dir / rel).write_text(body)
+    backups = tmp_path / "backups"
+    for old in ("20200101-000000.aaaaaa", "20200102-000000.bbbbbb", "20200103-000000.cccccc"):
+        (backups / old).mkdir(parents=True)
     script = f"""
 set -euo pipefail
-INSTALL_ROLLBACK_BACKUP_ROOT={shlex.quote(str(rollback_root))}
-{function_definition}
-preserved_dir=""
-if preserved_dir="$(preserve_install_rollback_backup {shlex.quote(str(bad_backup))})"; then
-  echo "unexpected success:$preserved_dir"
-  exit 10
-fi
-if [ -n "$preserved_dir" ]; then
-  echo "unexpected preserved path:$preserved_dir"
-  exit 11
-fi
+INSTALL_DIR={shlex.quote(str(install_dir))}
+INSTALL_BACKUP_ROOT={shlex.quote(str(backups))}
+INSTALL_BACKUP_KEEP=2
+INSTALL_BACKUP_DIR=""
+INSTALL_MUTATED=0
+INSTALL_SUCCESS=0
+INSTALL_ROLLED_BACK=0
+{functions}
+backup_managed_install_tree
+clean_managed_install_tree
+printf 'new binary' > "$INSTALL_DIR/commaviewd"
+printf 'new installer' > "$INSTALL_DIR/install.sh"
+mkdir -p "$INSTALL_DIR/vendor" && printf 'new vendor' > "$INSTALL_DIR/vendor/new.py"
+restore_previous_install_tree
+echo "rolled back=$INSTALL_ROLLED_BACK"
+prune_install_backups
 """
-
-    result = subprocess.run(
-        ["bash", "-c", script],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout == ""
+    assert "rolled back=1" in result.stdout
+    assert (install_dir / "commaviewd").read_text() == "old binary"
+    assert (install_dir / "install.sh").read_text() == "old installer"
+    assert (install_dir / "vendor" / "orjson.py").read_text() == "old vendor"
+    assert not (install_dir / "vendor" / "new.py").exists(), "vendor is put back, not merged"
+    # run/ keeps its state through an install; only the stopped runtime's pid files go.
+    assert (install_dir / "run" / "car-identity.json").read_text() == "{}"
+    assert not (install_dir / "run" / "bridge.pid").exists()
+    kept = sorted(path.name for path in backups.iterdir())
+    assert len(kept) == 2 and "20200103-000000.cccccc" in kept, kept
 
 
 def test_install_script_preserves_patch_flavor_state_and_supports_explicit_current_reinstall():
@@ -339,6 +352,15 @@ def test_verify_patch_script_requires_onroad_projection_markers():
     assert "$onroad_projection_present" in text
 
 
+def assert_no_index_writing_git(text: str) -> None:
+    """git checkout / reset / add / stash / update-index rewrite openpilot's .git/index, which makes
+    launch_chffrplus.sh take the tree for modified and mishandle a staged openpilot update."""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        assert not re.search(r"\bgit\b[^|;&]*\b(checkout|reset|add|stash|update-index|restore|clean)\b", line), line
+
+
 def test_apply_patch_script_refuses_implicit_destructive_repair_and_backs_up_force_repair():
     text = APPLY_PATCH_SH.read_text()
     restore_body = _shell_function_body(text, "restore_managed_targets_from_backup")
@@ -364,13 +386,12 @@ def test_apply_patch_script_refuses_implicit_destructive_repair_and_backs_up_for
     assert 'failed to back up managed onroad UI export transformer targets before transform' in text
     assert 'local reset_ec=0' in reset_body
     assert 'return "$reset_ec"' in reset_body
-    assert 'git -C "$OP_ROOT" checkout -- "$rel"' in reset_body
-    assert 'rm -f "$OP_ROOT/$rel"' in reset_body
+    assert 'restore_target_from_head "$rel" || reset_ec=1' in reset_body
     assert 'reset_managed_targets || reset_ec=$?' in text
     assert 'reset of managed targets had errors before rollback restore' in text
     assert 'while IFS= read -r rel; do' in restore_body
     assert 'mkdir -p "$OP_ROOT/$(dirname "$rel")"' in restore_body
-    assert 'cp -a "$backup_root/$rel" "$OP_ROOT/$rel"' in restore_body
+    assert 'atomic_copy "$backup_root/$rel" "$OP_ROOT/$rel"' in restore_body
     assert 'rm -f "$OP_ROOT/$rel"' in restore_body
     assert 'rollback_managed_targets_clean()' in text
     assert 'managed rollback incomplete; dirty targets remain:' in text
@@ -387,9 +408,7 @@ def test_apply_patch_script_refuses_implicit_destructive_repair_and_backs_up_for
     assert 'github.com:sunnypilot/sunnypilot' in text
     assert 'github.com:sunnypilot/openpilot' in text
     assert 'selfdrive/ui/mici' in text
-    assert 'git -C "$OP_ROOT" reset -q HEAD -- "$rel"' in text
-    assert 'git -C "$OP_ROOT" checkout -- "$rel"' in text
-    assert 'rm -f "$OP_ROOT/$rel"' in text
+    assert_no_index_writing_git(text)
     assert '--force-offroad' in text
     assert 'write_param' not in text
 
@@ -516,9 +535,9 @@ def test_revert_patch_script_resets_every_transformer_managed_target():
     assert "selfdrive/ui/ui_state.py" in text
     assert "selfdrive/ui/mici/onroad/augmented_road_view.py" in text
     assert "selfdrive/ui/onroad/augmented_road_view.py" in text
-    assert 'git -C "$OP_ROOT" reset -q HEAD -- "$rel"' in text
-    assert 'git -C "$OP_ROOT" checkout -- "$rel"' in text
-    assert 'rm -f "$OP_ROOT/$rel"' in text
+    assert_no_index_writing_git(text)
+    assert 'git -C "$OP_ROOT" cat-file -p "HEAD:./$rel"' in text
+    assert 'rm -f "$dst"' in text
 
 
 def test_apply_patch_script_records_ui_reload_instead_of_restarting_openpilot_ui():
@@ -567,12 +586,15 @@ def test_control_mode_routes_present_for_runtime_debug_config():
 # duplicated on purpose; this guard keeps the copies from drifting apart.
 DUPLICATED_SHELL_HELPERS = {
     "commaview_pids": (INSTALL_SH, STOP_SH),
-    "read_is_onroad": (INSTALL_SH, UNINSTALL_SH),
+    "read_is_onroad": (INSTALL_SH, UNINSTALL_SH, APPLY_PATCH_SH, REVERT_PATCH_SH),
     "read_param": (APPLY_PATCH_SH, REVERT_PATCH_SH),
     "openpilot_process_kind": (APPLY_PATCH_SH, VERIFY_PATCH_SH),
     "current_boot_id": (APPLY_PATCH_SH, VERIFY_PATCH_SH),
     "managed_targets": (APPLY_PATCH_SH, REVERT_PATCH_SH),
     "reset_managed_targets": (APPLY_PATCH_SH, REVERT_PATCH_SH),
+    "restore_target_from_head": (APPLY_PATCH_SH, REVERT_PATCH_SH),
+    "atomic_copy": (APPLY_PATCH_SH, REVERT_PATCH_SH),
+    "take_maint_lock": (APPLY_PATCH_SH, REVERT_PATCH_SH),
     "normalize_ui_platform": (APPLY_PATCH_SH, VERIFY_PATCH_SH),
     "read_device_model": (APPLY_PATCH_SH, VERIFY_PATCH_SH),
     "remote_flavor": (APPLY_PATCH_SH, VERIFY_PATCH_SH),

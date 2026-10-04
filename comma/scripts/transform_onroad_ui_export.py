@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 EXPORT_IMPORT = "from openpilot.selfdrive.ui.commaview_export import _CommaViewSocketExporter, COMMAVIEW_RUNTIME_FLAVOR"
+# openpilot's UI must load even when CommaView's exporter can't (an upstream rename, a broken helper).
+EXPORT_IMPORT_FALLBACK = "_CommaViewSocketExporter = None"
 EXPORT_INSTALL = "self._commaview_exporter = _CommaViewSocketExporter(COMMAVIEW_RUNTIME_FLAVOR)"
 EXPORT_PUBLISH = "self._commaview_exporter.publish(self)"
 CAMERA_EXPORT_CALL = "self._update_commaview_camera_export()"
@@ -50,11 +55,51 @@ def block_end(lines: list[str], start: int, indent: int) -> int:
     return len(lines)
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replaces path with text all at once: a temp file beside it, fsynced, renamed over it. A kill or
+    power loss leaves openpilot's old file or the new one, never a truncated one."""
+    mode = path.stat().st_mode & 0o7777 if path.exists() else 0o644
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.commaview-")
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
+def compiles(text: str, path: Path) -> bool:
+    """Compiled in memory (py_compile would leave a .pyc in openpilot's tree)."""
+    try:
+        compile(text, str(path), "exec")
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
 def write_lines_if_changed(path: Path, original: str, lines: list[str]) -> bool:
     new_text = "\n".join(lines) + ("\n" if original.endswith("\n") else "")
     if new_text == original:
         return False
-    path.write_text(new_text)
+    # Judged against openpilot's own file: a python3 older than openpilot's can't read either.
+    if compiles(original, path) and not compiles(new_text, path):
+        fail(f"patched {path.name} does not compile; leaving it unchanged")
+    atomic_write_text(path, new_text)
     return True
 
 
@@ -76,7 +121,13 @@ def ensure_export_import(lines: list[str]) -> bool:
     if insert_at is None:
         fail("unable to place commaview exporter import")
 
-    lines.insert(insert_at, EXPORT_IMPORT)
+    lines[insert_at:insert_at] = [
+        "try:",
+        f"  {EXPORT_IMPORT}",
+        "except Exception:",
+        f"  {EXPORT_IMPORT_FALLBACK}",
+        '  COMMAVIEW_RUNTIME_FLAVOR = ""',
+    ]
     return True
 
 
@@ -121,7 +172,7 @@ def install_helper_source(op_root: Path, flavor: str) -> bool:
     template = template_path.read_text()
     if target_path.exists() and target_path.read_text() == template:
         return False
-    target_path.write_text(template)
+    atomic_write_text(target_path, template)
     return True
 
 
@@ -166,13 +217,19 @@ def transform_ui_state(ui_state_path: Path) -> bool:
         device_idx = device_matches[0]
         body_indent = lines[device_idx][: line_indent(lines[device_idx])]
         inner_indent = body_indent + "  "
+        # Constructed once; if that fails the UI carries on without the exporter (logged once).
         export_block = [
             f'{body_indent}if not hasattr(self, "_commaview_exporter"):',
-            f"{inner_indent}{EXPORT_INSTALL}",
-            f"{body_indent}try:",
-            f"{inner_indent}{EXPORT_PUBLISH}",
-            f"{body_indent}except Exception:",
-            f'{inner_indent}cloudlog.exception("commaview ui export publish failed")',
+            f"{inner_indent}try:",
+            f"{inner_indent}  {EXPORT_INSTALL}",
+            f"{inner_indent}except Exception:",
+            f"{inner_indent}  self._commaview_exporter = None",
+            f'{inner_indent}  cloudlog.exception("commaview ui export unavailable")',
+            f"{body_indent}if self._commaview_exporter is not None:",
+            f"{inner_indent}try:",
+            f"{inner_indent}  {EXPORT_PUBLISH}",
+            f"{inner_indent}except Exception:",
+            f'{inner_indent}  cloudlog.exception("commaview ui export publish failed")',
         ]
         lines[device_idx + 1 : device_idx + 1] = export_block
 
@@ -274,6 +331,74 @@ def transform_augmented_road_view(augmented_path: Path) -> bool:
     return write_lines_if_changed(augmented_path, original, lines)
 
 
+# Markers only CommaView's patch puts in openpilot's UI files.
+COMMAVIEW_MARKERS = ("_commaview_exporter", CAMERA_EXPORT_HELPER, PROJECTION_EXPORT_CALL)
+
+
+def git_head_text(repo: Path, rel: str) -> str | None:
+    """rel as openpilot's HEAD has it, read without touching .git/index; None when HEAD lacks it."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-p", f"HEAD:./{rel}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def patched_from_head(head: str, rel: str) -> str | None:
+    """What this transformer makes of HEAD's file, or None when it can't patch it."""
+    import contextlib
+    import io
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / Path(rel).name
+        path.write_text(head)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                if path.name == "ui_state.py":
+                    transform_ui_state(path)
+                else:
+                    transform_augmented_road_view(path)
+        except SystemExit:
+            return None
+        return path.read_text()
+
+
+def classify_target(repo: Path, rel: str) -> str:
+    """How a managed file stands against openpilot's HEAD:
+    clean / untracked / absent: nothing to undo; current: this transformer's patch of HEAD;
+    ours: an older CommaView patch; damaged: missing, truncated or no longer compiling (a write cut
+    short by a kill or power loss); foreign: someone else's change, left alone."""
+    path = repo / rel
+    head = git_head_text(repo, rel)
+    if head is None:
+        return "untracked" if path.exists() else "absent"
+    if not path.is_file():
+        return "damaged"
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return "damaged"
+    if text == head:
+        return "clean"
+    if compiles(head, path) and not compiles(text, path):
+        return "damaged"
+    if head.startswith(text):
+        return "damaged"
+    if text == patched_from_head(head, rel):
+        return "current"
+    if any(marker in text for marker in COMMAVIEW_MARKERS):
+        return "ours"
+    return "foreign"
+
+
 def transform(op_root: Path, flavor: str, platform: str = "auto") -> None:
     if flavor not in {"openpilot", "sunnypilot"}:
         fail(f"unsupported flavor: {flavor}")
@@ -290,7 +415,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--op-root", required=True, type=Path)
     parser.add_argument("--flavor", required=True, choices=("openpilot", "sunnypilot"))
     parser.add_argument("--platform", default="auto", choices=PLATFORM_CHOICES)
+    parser.add_argument("--classify", nargs="+", metavar="REL",
+                        help="print '<class> <rel>' for each file (relative to --op-root) and change nothing")
     args = parser.parse_args(argv)
+    if args.classify:
+        for rel in args.classify:
+            print(f"{classify_target(args.op_root, rel)} {rel}")
+        return 0
     transform(args.op_root, args.flavor, args.platform)
     return 0
 

@@ -2,6 +2,7 @@
 #include "gps_peek.h"
 #include "http_server.h"
 #include "manager_state_peek.h"
+#include "process_hygiene.h"
 #include "process_watch.h"
 #include "road_phase.h"
 #include "runtime_debug_config.h"
@@ -87,6 +88,7 @@ std::string swaglog_dir();
 std::string process_events_log_path();
 std::string process_watch_status_json();
 std::string leaderboard_seed_for_redaction();
+std::string deferred_maintenance_dir();
 
 std::vector<SupportLogFileSpec> support_log_files() {
   // Put the small structured snapshots first. Large rolling logs can consume the
@@ -113,6 +115,9 @@ std::vector<SupportLogFileSpec> support_log_files() {
       {"onroad-ui-export-startup.log", "/data/commaview/logs/onroad-ui-export-startup.log", false},
       // The drive stats script's own log never holds positions.
       {"commaview-drive-stats.log", "/data/commaview/logs/commaview-drive-stats.log", false},
+      // Installs, uninstalls and repairs that waited for Park, and their output.
+      {"deferred-maintenance.log", deferred_maintenance_dir() + "/deferred.log", false},
+      {"deferred-maintenance.log.1", deferred_maintenance_dir() + "/deferred.log.1", true},
   };
   const std::array<std::string, 5> rotated = {{
       "commaviewd-bridge.log",
@@ -645,7 +650,8 @@ std::string discovery_response_json() {
 }
 
 void discovery_responder_loop() {
-  const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  // Close-on-exec: with SO_REUSEPORT a copy left in a helper would take a share of the queries.
+  const int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     std::perror("commaviewd discovery socket");
     return;
@@ -931,10 +937,11 @@ bool run_command(const std::vector<std::string>& args,
                  std::string* stderr_text) {
   if (args.empty()) return false;
 
+  // Close-on-exec, so a helper another thread forks meanwhile can't hold them open.
   int out_pipe[2];
   int err_pipe[2];
-  if (pipe(out_pipe) != 0) return false;
-  if (pipe(err_pipe) != 0) {
+  if (pipe2(out_pipe, O_CLOEXEC) != 0) return false;
+  if (pipe2(err_pipe, O_CLOEXEC) != 0) {
     close(out_pipe[0]);
     close(out_pipe[1]);
     return false;
@@ -950,9 +957,9 @@ bool run_command(const std::vector<std::string>& args,
   if (pid == 0) {
     dup2(out_pipe[1], STDOUT_FILENO);
     dup2(err_pipe[1], STDERR_FILENO);
-
-    close(out_pipe[0]); close(out_pipe[1]);
-    close(err_pipe[0]); close(err_pipe[1]);
+    // Only stdin, stdout and stderr go to the helper (which may outlive this process, like the
+    // deferred queue's waiter): none of control's sockets or files.
+    commaview::runtime::close_fds_from(3);
 
     std::vector<char*> argv;
     argv.reserve(args.size() + 1);
@@ -1441,6 +1448,7 @@ void prepare_drive_script(const std::vector<std::string>& args, DriveScriptComma
     dup2(log_fd, STDERR_FILENO);
     close(log_fd);
   }
+  close_fds_from(3);
   if (cmd.workdir != nullptr && chdir(cmd.workdir) != 0) _exit(126);
   if (nice(19) == -1) {
     // Normal priority still beats not running.
@@ -1949,11 +1957,29 @@ std::string deferred_runner_path() {
 
 // The queue's status JSON: {"state":"none"} when nothing was ever queued, else state
 // waiting / running / done / failed / cancelled, with action, queuedAtMs, startedAtMs,
-// finishedAtMs, attempts and exitStatus.
+// finishedAtMs, attempts and exitStatus. A queued install also reports where it is (install.sh's
+// progress.json): stage (starting, downloading, verifying, installing, restarting, done,
+// rolled_back, failed), stageDetail and stageAtMs, absent until it has started. The last stage
+// stays after the job, so the app still reads why it failed once the new runtime answers.
 std::string deferred_maintenance_json() {
   const std::string raw = read_file_trimmed(deferred_maintenance_dir() + "/status.json");
   if (raw.size() < 2 || raw.front() != '{' || raw.back() != '}') return "{\"state\":\"none\"}";
-  return raw;
+  const std::string progress = read_file_trimmed(deferred_maintenance_dir() + "/progress.json");
+  std::string stage;
+  if (!extract_raw_string_field(progress, "stage", &stage) ||
+      stage.find_first_not_of("abcdefghijklmnopqrstuvwxyz_") != std::string::npos) {
+    return raw;
+  }
+  std::string detail;
+  extract_raw_string_field(progress, "detail", &detail);
+  double at_ms = 0;
+  extract_number_field(progress, "atMs", &at_ms);
+  std::ostringstream out;
+  out << raw.substr(0, raw.size() - 1);
+  if (raw.find(':') != std::string::npos) out << ",";
+  out << "\"stage\":\"" << stage << "\",\"stageDetail\":\"" << json_escape(detail)
+      << "\",\"stageAtMs\":" << static_cast<int64_t>(at_ms) << "}";
+  return out.str();
 }
 
 // A repair asked for while driving ("Safe Repair"): queued to run once the car is parked.

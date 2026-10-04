@@ -39,7 +39,7 @@ bool client_socket_alive(int fd) {
 }
 
 int create_server(int port) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     perror("socket");
     return -1;

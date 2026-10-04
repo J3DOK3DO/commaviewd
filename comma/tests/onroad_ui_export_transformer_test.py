@@ -644,6 +644,7 @@ def lifecycle_env(install_dir: Path, op_root: Path, **extra: str) -> dict[str, s
         "COMMAVIEWD_INSTALL_DIR": str(install_dir),
         "COMMAVIEWD_OP_ROOT": str(op_root),
         "COMMAVIEWD_SKIP_OPENPILOT_UI_RESTART": "1",
+        "COMMAVIEWD_MAINT_LOCK": str(install_dir.parent / "maint.lock"),
         **extra,
     }
 
@@ -709,6 +710,7 @@ def failing_mktemp_path(tmp_path: Path) -> str:
 
 
 def failing_git_checkout_path(tmp_path: Path) -> str:
+    """git that fails to read a file from HEAD (git cat-file -p), how targets are restored."""
     real_git = shutil.which("git")
     assert real_git
     fakebin = tmp_path / "fakegitbin"
@@ -716,9 +718,11 @@ def failing_git_checkout_path(tmp_path: Path) -> str:
     fake_git = fakebin / "git"
     fake_git.write_text(
         "#!/bin/sh\n"
+        "is_cat=0\n"
         "for arg in \"$@\"; do\n"
-        "  if [ \"$arg\" = checkout ]; then\n"
-        "    echo forced git checkout failure >&2\n"
+        "  if [ \"$arg\" = cat-file ]; then is_cat=1; fi\n"
+        "  if [ \"$is_cat\" = 1 ] && [ \"$arg\" = -p ]; then\n"
+        "    echo forced git cat-file failure >&2\n"
         "    exit 88\n"
         "  fi\n"
         "done\n"
@@ -741,8 +745,8 @@ def failing_git_checkout_after_mutating_path(tmp_path: Path, op_root: Path, relp
         "prev=\"\"\n"
         "for arg in \"$@\"; do\n"
         "  if [ \"$prev\" = -C ]; then git_root=\"$arg\"; fi\n"
-        "  if [ \"$arg\" = checkout ]; then is_checkout=1; fi\n"
-        f"  if [ \"$is_checkout\" = 1 ] && [ \"$git_root\" = {shlex.quote(str(op_root))} ] && [ \"$arg\" = {shlex.quote(relpath)} ]; then\n"
+        "  if [ \"$arg\" = -p ] && [ \"$prev\" = cat-file ]; then is_checkout=1; fi\n"
+        f"  if [ \"$is_checkout\" = 1 ] && [ \"$git_root\" = {shlex.quote(str(op_root))} ] && [ \"$arg\" = {shlex.quote('HEAD:./' + relpath)} ]; then\n"
         f"    printf '%s\\n' {shlex.quote(replacement)} > {shlex.quote(str(op_root / relpath))}\n"
         "    echo forced partial git checkout failure >&2\n"
         "    exit 88\n"

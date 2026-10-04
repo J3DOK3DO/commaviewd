@@ -190,7 +190,7 @@ bool SocketServer::start() {
 
   unlink(socket_path_.c_str());
 
-  const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     std::perror("socket(AF_UNIX)");
     return false;
@@ -494,7 +494,7 @@ void SocketServer::mark_client_connected(bool connected) {
 
 void SocketServer::accept_loop() {
   while (running_.load()) {
-    const int client_fd = accept(server_fd_, nullptr, nullptr);
+    const int client_fd = accept4(server_fd_, nullptr, nullptr, SOCK_CLOEXEC);
     if (client_fd < 0) {
       if (running_.load() && errno != EINTR) std::perror("accept(AF_UNIX)");
       continue;
