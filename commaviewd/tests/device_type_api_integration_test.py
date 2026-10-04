@@ -3,7 +3,7 @@
 can't tell) in /commaview/version, /commaview/status and the local discovery reply, read from the
 devicetree model the way openpilot reads it. The comma 3 (tici) is reported as itself, never as
 the comma 3X (tizi): CommaView doesn't support it, and the app says so from this field. deviceModel
-and the other identity fields are unchanged."""
+and the other identity fields are unchanged (deviceModel is "comma" without a HardwareModel param)."""
 
 import json
 import os
@@ -47,7 +47,6 @@ def run_case(binary, root, model, want):
     params = root / "params"
     params.mkdir(exist_ok=True)
     (params / "IsOffroad").write_text("1")
-    (params / "HardwareModel").write_text("comma test model")
     model_file = root / "model"
     if model is None:
         model_file.unlink(missing_ok=True)
@@ -68,14 +67,14 @@ def run_case(binary, root, model, want):
                 time.sleep(0.1)
         assert version is not None, "control API did not start"
         assert version["deviceType"] == want, (model, version)
-        assert version["deviceModel"] == "comma test model", version
-        assert version["device"] == "comma test model", version
+        assert version["deviceModel"] == "comma", version
+        assert version["device"] == "comma", version
         status = request(port, "/commaview/status")
         assert status["deviceType"] == want, (model, status.get("deviceType"))
         reply = discover()
         assert reply["type"] == "commaview.discovery.v1", reply
         assert reply["deviceType"] == want, (model, reply)
-        assert reply["deviceModel"] == "comma test model", reply
+        assert reply["deviceModel"] == "comma", reply
     finally:
         process.terminate()
         try:
