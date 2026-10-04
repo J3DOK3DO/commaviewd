@@ -101,7 +101,7 @@ ensure_offroad_ready
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   exit 0
 fi
-if ! take_maint_lock 30; then
+if ! take_maint_lock "${COMMAVIEWD_MAINT_LOCK_WAIT_SEC:-30}"; then
   echo "ERROR: another CommaView install, uninstall or repair is running; try again when it has finished" >&2
   exit 1
 fi

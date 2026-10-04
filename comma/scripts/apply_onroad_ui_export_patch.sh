@@ -222,10 +222,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# At boot the hook's whole step is bounded (start.sh), so wait less there.
-maint_lock_wait=30
-[ "$BEFORE_OPENPILOT" = "1" ] && maint_lock_wait=10
-if ! take_maint_lock "$maint_lock_wait"; then
+# Not long: commaviewd's API answers one request at a time and waits for a repair, and the
+# boot hook's whole step is bounded (start.sh). An install holds the lock for minutes anyway.
+if ! take_maint_lock "${COMMAVIEWD_MAINT_LOCK_WAIT_SEC:-10}"; then
   echo "ERROR: another CommaView install, uninstall or repair is running; try again when it has finished" >&2
   exit 1
 fi
