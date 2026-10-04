@@ -337,13 +337,17 @@ cmd_wait() {
       stable=0
       continue
     fi
+    # The final status is made from the job's files but published only once the job is gone, so
+    # whoever reads done or failed (the app, a new queue) never finds the old job still there.
+    local final_status="$STATUS.final.$$"
     if [ "$ec" = "0" ]; then
-      write_status done "$ec"
+      STATUS="$final_status" write_status done "$ec"
     else
-      write_status failed "$ec"
+      STATUS="$final_status" write_status failed "$ec"
     fi
     log "$action finished: exit $ec"
     rm -rf "$JOB_DIR"
+    mv -f "$final_status" "$STATUS" 2>/dev/null || rm -f "$final_status"
     rm -f "$STATE_DIR/waiter.pid"
     if [ "$action" = "uninstall" ] && [ "$ec" = "0" ]; then
       # Nothing of CommaView stays behind an uninstall, this queue included.
