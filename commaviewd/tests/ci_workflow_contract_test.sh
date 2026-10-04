@@ -29,9 +29,11 @@ python3 -m json.tool "$TARGETS" >/dev/null || { echo "FAIL: ci/targets.json is n
 # The targets (ci/targets.json, planned by ci/plan-targets.py).
 assert_contains '"name": "openpilot-release-mici"' "$TARGETS" "commaviewd CI should validate openpilot release-mici"
 assert_contains '"upstream_ref": "release-mici"' "$TARGETS" "commaviewd CI should include MICI release refs"
-assert_contains '"name": "openpilot-release-tici"' "$TARGETS" "commaviewd CI should validate openpilot release-tici"
-assert_contains '"upstream_ref": "release-tici"' "$TARGETS" "commaviewd CI should include openpilot TICI release ref"
-assert_contains '"run_verification": false' "$TARGETS" "legacy openpilot release-tici should be patch-applicability only"
+# The comma 3 (tici) isn't supported: its frozen release-tici draws its screen with the Qt UI.
+if grep -Fq 'tici' "$TARGETS"; then
+  echo "FAIL: commaviewd CI should not check the unsupported comma 3 (release-tici)" >&2
+  exit 1
+fi
 assert_contains '"upstream_repo": "commaai/openpilot"' "$TARGETS" "commaviewd CI should include commaai/openpilot"
 assert_contains '"name": "sunnypilot-release-mici"' "$TARGETS" "commaviewd CI should validate sunnypilot release-mici"
 assert_contains '"name": "sunnypilot-release-tizi"' "$TARGETS" "commaviewd CI should validate sunnypilot release-tizi"
@@ -42,6 +44,13 @@ assert_contains '"name": "openpilot-release-chestnut-mici"' "$TARGETS" "commavie
 assert_contains '"name": "openpilot-release-chestnut-tizi"' "$TARGETS" "commaviewd CI should validate openpilot release-chestnut on TIZI"
 assert_contains '"upstream_ref": "release-chestnut"' "$TARGETS" "commaviewd CI should include the openpilot chestnut release ref"
 assert_contains '"name": "sunnypilot-release-pin"' "$TARGETS" "commaviewd CI should build the pinned sunnypilot release source"
+# Staging, so drift between releases shows before it ships.
+for name in openpilot-release-mici-staging openpilot-release-tizi-staging \
+    openpilot-release-chestnut-staging-mici openpilot-release-chestnut-staging-tizi \
+    sunnypilot-release-mici-staging sunnypilot-release-tizi-staging \
+    sunnypilot-staging-chestnut-mici sunnypilot-staging-chestnut-tizi; do
+  assert_contains "\"name\": \"$name\"" "$TARGETS" "commaviewd CI should validate $name"
+done
 assert_contains 'upstream-refs.env' "$PLAN" "commaviewd CI should resolve the release pin from ci/upstream-refs.env"
 assert_contains 'COMMAVIEWD_RELEASE_SUNNYPILOT_REF' "$PLAN" "commaviewd CI should resolve the release pin from ci/upstream-refs.env"
 # An unset run_verification means "verify": only an explicit false opts a target out.
@@ -53,7 +62,7 @@ assert_contains "uses: ./.github/workflows/commaviewd-verify.yml" "$WORKFLOW" "c
 assert_contains "targets: ci/targets.json" "$WORKFLOW" "commaviewd CI should verify ci/targets.json"
 assert_contains "ci/plan-targets.py" "$VERIFY" "commaviewd CI should plan its targets with ci/plan-targets.py"
 assert_contains 'target: ${{ fromJSON(needs.plan.outputs.targets) }}' "$VERIFY" "commaviewd CI matrix should come from the plan"
-assert_contains '--platform "${{ matrix.target.ui_platform }}"' "$VERIFY" "commaviewd CI should pass explicit MICI/TICI/TIZI platform"
+assert_contains '--platform "${{ matrix.target.ui_platform }}"' "$VERIFY" "commaviewd CI should pass explicit MICI/TIZI platform"
 assert_contains 'ref: ${{ matrix.target.sha }}' "$VERIFY" "commaviewd CI upstream checkout should be pinned to the planned SHA"
 assert_contains 'if: matrix.target.run_verification' "$VERIFY" "commaviewd CI should run verification for the targets the plan picks"
 if grep -Fq 'run_verification != false }}' "$VERIFY"; then

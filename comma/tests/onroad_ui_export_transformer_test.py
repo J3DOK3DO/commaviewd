@@ -492,14 +492,83 @@ def test_transformer_platform_tizi_only_patches_flat_onroad_target(tmp_path):
     assert CAMERA_EXPORT_CALL not in (op_root / "selfdrive" / "ui" / "mici" / "onroad" / "augmented_road_view.py").read_text()
 
 
-def test_transformer_platform_tici_alias_patches_flat_onroad_target(tmp_path):
+TICI_UNSUPPORTED = "CommaView doesn't support the comma 3 (tici)"
+
+
+def tree_snapshot(op_root: Path) -> dict[str, str]:
+    return {str(path.relative_to(op_root)): path.read_text() for path in sorted(op_root.rglob("*")) if path.is_file() and ".git" not in path.parts}
+
+
+def test_transformer_refuses_tici_without_touching_the_tree(tmp_path):
     op_root = write_full_augmented_tree(tmp_path)
+    before = tree_snapshot(op_root)
 
     result = run_transformer(op_root, "--platform", "tici")
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 43, result.stderr
+    assert TICI_UNSUPPORTED in result.stderr
+    assert "comma 3X and comma four are supported" in result.stderr
+    assert tree_snapshot(op_root) == before
+
+
+def fake_device_model(tmp_path: Path, model: str) -> str:
+    model_file = tmp_path / "devicetree-model"
+    model_file.write_bytes(model.encode() + b"\0")
+    return str(model_file)
+
+
+@pytest.mark.parametrize("platform_args", [("--platform", "tici"), ("--platform", "auto"), ()])
+def test_apply_refuses_tici_without_touching_openpilot(tmp_path, platform_args):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    state_env = (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
+    before = tree_snapshot(op_root)
+
+    applied = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair", *platform_args,
+                                   COMMAVIEWD_DEVICE_MODEL_FILE=fake_device_model(tmp_path, "comma tici"))
+
+    assert applied.returncode == 43, applied.stderr
+    assert TICI_UNSUPPORTED in applied.stderr
+    assert tree_snapshot(op_root) == before
+    assert subprocess.run(["git", "status", "--porcelain"], cwd=op_root, text=True, capture_output=True, check=True).stdout == ""
+    assert (install_dir / "config" / "onroad-ui-export-patch.env").read_text() == state_env
+    assert not (install_dir / "backups").exists()
+
+
+def test_apply_on_a_comma_3x_still_patches(tmp_path):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+
+    applied = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair",
+                                   COMMAVIEWD_DEVICE_MODEL_FILE=fake_device_model(tmp_path, "comma tizi"))
+
+    assert applied.returncode == 0, applied.stderr
+    assert "ONROAD_UI_EXPORT_UI_PLATFORM=tizi" in (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
     assert_augmented_transformed(op_root / "selfdrive" / "ui" / "onroad" / "augmented_road_view.py")
-    assert CAMERA_EXPORT_CALL not in (op_root / "selfdrive" / "ui" / "mici" / "onroad" / "augmented_road_view.py").read_text()
+
+
+@pytest.mark.parametrize("platform_args", [("--platform", "tici"), ()])
+def test_verify_reports_tici_unsupported(tmp_path, platform_args):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    before = tree_snapshot(op_root)
+
+    verified = run_lifecycle_script(REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh", install_dir, op_root,
+                                    "--json", *platform_args, COMMAVIEWD_DEVICE_MODEL_FILE=fake_device_model(tmp_path, "comma tici"))
+
+    assert verified.returncode == 43, verified.stderr
+    status = json.loads(verified.stdout)
+    assert status["state"] == "unsupported-device"
+    assert status["uiPlatform"] == "tici"
+    assert status["deviceModel"] == "tici"
+    assert status["patchVerified"] is False
+    assert status["repairNeeded"] is False
+    assert TICI_UNSUPPORTED in status["reason"]
+    assert json.loads((install_dir / "run" / "onroad-ui-export-status.json").read_text())["state"] == "unsupported-device"
+    assert tree_snapshot(op_root) == before
 
 
 def test_transformer_platform_mici_only_patches_mici_target(tmp_path):

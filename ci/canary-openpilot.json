@@ -1,8 +1,10 @@
 [
-  {"name": "nightly", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly", "ui_platform": "tizi", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
-  {"name": "nightly-dev", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-dev", "ui_platform": "tizi", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
-  {"name": "master", "upstream_repo": "commaai/openpilot", "upstream_ref": "master", "ui_platform": "mici", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
-  {"name": "release-mici-staging", "upstream_repo": "commaai/openpilot", "upstream_ref": "release-mici-staging", "ui_platform": "mici"},
-  {"name": "release-tizi-staging", "upstream_repo": "commaai/openpilot", "upstream_ref": "release-tizi-staging", "ui_platform": "tizi"},
-  {"name": "release-chestnut-staging", "upstream_repo": "commaai/openpilot", "upstream_ref": "release-chestnut-staging", "ui_platform": "mici"}
+  {"name": "nightly-mici", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly", "ui_platform": "mici", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-tizi", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly", "ui_platform": "tizi", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-dev-mici", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-dev", "ui_platform": "mici", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-dev-tizi", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-dev", "ui_platform": "tizi", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-chestnut-mici", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-chestnut", "ui_platform": "mici", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-chestnut-tizi", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-chestnut", "ui_platform": "tizi", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-chestnut-dev-mici", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-chestnut-dev", "ui_platform": "mici", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"},
+  {"name": "nightly-chestnut-dev-tizi", "upstream_repo": "commaai/openpilot", "upstream_ref": "nightly-chestnut-dev", "ui_platform": "tizi", "run_verification": false, "why": "bleeding-edge upstream ABI: interface guard and patch applicability only"}
 ]

@@ -209,6 +209,7 @@ COMMAVIEWD_MANAGER_STATE_QUEUE_TOOL="$TMP/test_manager_state_peek" python3 "$ROO
 "$ROOT/tests/upstream_interface_guard_transformer_test.sh"
 "$ROOT/tests/device_test_workflow_contract_test.sh"
 "$ROOT/tests/ci_workflow_contract_test.sh"
+"$ROOT/tests/ci_local_checkout_cache_test.sh"
 "$ROOT/tests/release_workflow_contract_test.sh"
 "$ROOT/tests/raw_only_runtime_contract_test.sh"
 "$ROOT/tests/video_msgq_conflate_contract_test.sh"
@@ -226,5 +227,6 @@ COMMAVIEWD_MANAGER_STATE_QUEUE_TOOL="$TMP/test_manager_state_peek" python3 "$ROO
 "$REPO_ROOT/comma/tests/runtime_support_logs_contract_test.sh"
 "$REPO_ROOT/comma/tests/install_release_resolution_contract_test.sh"
 "$REPO_ROOT/comma/tests/install_release_origin_contract_test.sh"
+"$REPO_ROOT/comma/tests/install_unsupported_device_contract_test.sh"
 python3 -m pytest "$REPO_ROOT/comma/tests" -q
 echo "PASS: commaviewd unit tests passed"

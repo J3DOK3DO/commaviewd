@@ -13,12 +13,14 @@ GitHub Actions minutes are limited, and each commaviewd check is a cross build a
 tree. Test on this machine while you work.
 
 - `scripts/ci-local.sh` runs the checks for the source releases build from
-  (`sunnypilot-release-pin`); name targets (`--list`), or pass `--all` before a pull request is
+  (`sunnypilot-release-pin`: a sunnypilot staging commit pinned on purpose in
+  `ci/upstream-refs.env`); name targets (`--list`), or pass `--all` before a pull request is
   ready. A canary's targets: `scripts/ci-local.sh --targets ci/canary-sunnypilot.json --all`.
 - The verification build needs the arm64 cross toolchain: `scripts/install-commaviewd-toolchain.sh`
   (Ubuntu 24.04; it rewrites the apt sources, so only in a container or on a build host). Web
   sessions install it at start (`.claude/hooks/session-start.sh`).
-- Targets are data: `ci/targets.json` (CI) and `ci/canary-*.json` (the canaries), planned by
+- Targets are data: `ci/targets.json` (CI: release and staging branches) and `ci/canary-*.json`
+  (the canaries: openpilot nightlies, sunnypilot dev), planned by
   `ci/plan-targets.py` for both the workflows and `scripts/ci-local.sh`. All three workflows run
   `.github/workflows/commaviewd-verify.yml`.
 

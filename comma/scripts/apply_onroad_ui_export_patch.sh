@@ -209,6 +209,21 @@ ensure_offroad_ready() {
   exit 42
 }
 
+# The comma 3 (tici) runs openpilot's frozen release-tici, whose screen is the native Qt UI: the
+# Python UI the transformer edits isn't running there, so a patch would only look like it worked.
+UNSUPPORTED_DEVICE_EXIT=43
+unsupported_device_message() {
+  echo "CommaView doesn't support the comma 3 (tici): its openpilot release (release-tici) is frozen upstream and draws its screen differently. comma 3X and comma four are supported."
+}
+
+# Which comma this is, as openpilot reads it (HARDWARE.get_device_type()): "comma tici", "comma
+# tizi" or "comma mici".
+read_device_model() {
+  local model_path="${COMMAVIEWD_DEVICE_MODEL_FILE:-/sys/firmware/devicetree/base/model}"
+  [ -f "$model_path" ] || return 1
+  tr -d '\000\r\n' < "$model_path" | sed 's/^comma //'
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     # Accepted from older callers; it changes nothing (nothing forces openpilot offroad).
@@ -217,10 +232,24 @@ while [ "$#" -gt 0 ]; do
     --before-openpilot) BEFORE_OPENPILOT=1; shift ;;
     --platform) REQUESTED_UI_PLATFORM="${2:-}"; shift 2 ;;
     --platform=*) REQUESTED_UI_PLATFORM="${1#--platform=}"; shift ;;
-    -h|--help) echo "Usage: apply_onroad_ui_export_patch.sh [--force-offroad] [--force-repair] [--before-openpilot] [--platform auto|mici|tizi|tici]"; exit 0 ;;
+    -h|--help) echo "Usage: apply_onroad_ui_export_patch.sh [--force-offroad] [--force-repair] [--before-openpilot] [--platform auto|mici|tizi]"; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+# Refused before anything else, so a comma 3 never has openpilot's files touched.
+requested_or_detected_tici() {
+  [ "$REQUESTED_UI_PLATFORM" = "tici" ] && return 0
+  [ "$REQUESTED_UI_PLATFORM" = "auto" ] || return 1
+  case "$(read_device_model || true)" in
+    *tici*|*TICI*) return 0 ;;
+  esac
+  return 1
+}
+if requested_or_detected_tici; then
+  echo "ERROR: $(unsupported_device_message)" >&2
+  exit "$UNSUPPORTED_DEVICE_EXIT"
+fi
 
 # Not long: commaviewd's API answers one request at a time and waits for a repair, and the
 # boot hook's whole step is bounded (start.sh). An install holds the lock for minutes anyway.
@@ -261,15 +290,11 @@ normalize_ui_platform() {
   case "$1" in
     auto) printf '%s\n' auto ;;
     mici) printf '%s\n' mici ;;
-    tizi|tici) printf '%s\n' tizi ;;
+    tizi) printf '%s\n' tizi ;;
+    # Not supported, and named so the caller can say so (see unsupported_device_message).
+    tici) printf '%s\n' tici ;;
     *) return 1 ;;
   esac
-}
-
-read_device_model() {
-  local model_path="/sys/firmware/devicetree/base/model"
-  [ -f "$model_path" ] || return 1
-  tr -d '\000\r\n' < "$model_path" | sed 's/^comma //'
 }
 
 detect_ui_platform() {
@@ -284,7 +309,8 @@ detect_ui_platform() {
   device_model="$(read_device_model || true)"
   case "$device_model" in
     *mici*|*MICI*|*comma\ 4*) printf '%s\n' mici; return 0 ;;
-    *tizi*|*TIZI*|*tici*|*TICI*|*comma\ 3*) printf '%s\n' tizi; return 0 ;;
+    *tizi*|*TIZI*) printf '%s\n' tizi; return 0 ;;
+    *tici*|*TICI*) printf '%s\n' tici; return 0 ;;
   esac
   state_platform="$(state_value ONROAD_UI_EXPORT_UI_PLATFORM || true)"
   state_op_root="$(state_value ONROAD_UI_EXPORT_OP_ROOT || true)"

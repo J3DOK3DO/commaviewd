@@ -25,8 +25,17 @@ AUGMENTED_ROAD_RELATIVE_PATHS = (
     Path("selfdrive/ui/mici/onroad/augmented_road_view.py"),
     Path("selfdrive/ui/onroad/augmented_road_view.py"),
 )
+# "tici" is accepted only to refuse it by name: see UNSUPPORTED_PLATFORMS.
 PLATFORM_CHOICES = ("auto", "mici", "tizi", "tici")
-NORMALIZED_PLATFORMS = {"mici": "mici", "tizi": "tizi", "tici": "tizi"}
+SUPPORTED_PLATFORMS = ("mici", "tizi")
+# The comma 3 (tici) runs openpilot's frozen release-tici, whose screen is the native Qt UI: the
+# Python UI this transformer edits isn't running there, so patching it would only look like it
+# worked. Exit status for an unsupported device (the patch scripts use the same).
+UNSUPPORTED_PLATFORMS = {
+    "tici": "CommaView doesn't support the comma 3 (tici): its openpilot release (release-tici) is frozen "
+            "upstream and draws its screen differently. comma 3X and comma four are supported.",
+}
+UNSUPPORTED_DEVICE_EXIT = 43
 
 
 def fail(message: str) -> None:
@@ -131,13 +140,17 @@ def ensure_export_import(lines: list[str]) -> bool:
     return True
 
 
+def refuse_unsupported_platform(platform: str) -> None:
+    if platform in UNSUPPORTED_PLATFORMS:
+        print(f"ERROR: {UNSUPPORTED_PLATFORMS[platform]}", file=sys.stderr)
+        raise SystemExit(UNSUPPORTED_DEVICE_EXIT)
+
+
 def normalize_platform(platform: str) -> str:
-    if platform == "auto":
-        return "auto"
-    try:
-        return NORMALIZED_PLATFORMS[platform]
-    except KeyError:
-        fail(f"unsupported UI platform: {platform}")
+    refuse_unsupported_platform(platform)
+    if platform == "auto" or platform in SUPPORTED_PLATFORMS:
+        return platform
+    fail(f"unsupported UI platform: {platform}")
 
 
 def source_root(op_root: Path) -> Path:
@@ -402,6 +415,8 @@ def classify_target(repo: Path, rel: str) -> str:
 def transform(op_root: Path, flavor: str, platform: str = "auto") -> None:
     if flavor not in {"openpilot", "sunnypilot"}:
         fail(f"unsupported flavor: {flavor}")
+    # Before anything is written.
+    refuse_unsupported_platform(platform)
     ui_root = source_root(op_root)
     install_helper_source(ui_root, flavor)
     transform_ui_state(ui_root / "selfdrive" / "ui" / "ui_state.py")
