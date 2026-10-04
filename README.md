@@ -2,7 +2,14 @@
 
 > ⚠️ Unofficial project. Community-maintained and not affiliated with or endorsed by comma.ai.
 
-`commaviewd` is the comma-side C++ runtime for CommaView, plus comma-device install, patch, verification, and release tooling.
+`commaviewd` is the comma-side C++ runtime for [CommaView](https://commaview.com), plus comma-device install, patch, verification, and release tooling.
+
+CommaView shows your comma's road camera and openpilot or sunnypilot driving overlays on your Android phone, tablet or head unit, over your own network. It works with the comma 3X and comma four. The app's guided setup installs this runtime for you.
+
+- [commaview.com](https://commaview.com): what CommaView is, and the beta.
+- [Install guide](https://commaview.com/docs/install).
+- [What's new](https://commaview.com/whats-new).
+- [Discord](https://discord.gg/UuMhz9K8ft) · [YouTube](https://www.youtube.com/@CommaView) · [X](https://x.com/CommaView).
 
 ## At a glance
 
