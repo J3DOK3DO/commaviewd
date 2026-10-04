@@ -106,7 +106,10 @@ refuse_unsupported_device() {
   model="$(tr -d '\000\r\n' < "$model_file" 2>/dev/null || true)"
   case "$model" in
     *tici*|*TICI*)
-      echo "ERROR: CommaView doesn't support the comma 3 (tici): its openpilot release (release-tici) is frozen upstream and draws its screen differently. comma 3X and comma four are supported." >&2
+      # The app reads either line from the SSH install's output: the marker, or the sentence.
+      echo "COMMAVIEW_UNSUPPORTED_DEVICE=tici"
+      echo "CommaView doesn't support the comma 3 (tici): its openpilot release (release-tici) is frozen upstream and draws its screen differently. comma 3X and comma four are supported."
+      echo "ERROR: CommaView doesn't support the comma 3 (tici)." >&2
       if [ -f /data/commaview/uninstall.sh ]; then
         echo "To remove an earlier CommaView install: bash /data/commaview/uninstall.sh" >&2
       fi

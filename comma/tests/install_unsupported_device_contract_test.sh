@@ -30,7 +30,10 @@ run_install() {
   rc=0
   out="$(PATH="$TMP/bin:$PATH" TMPDIR="$TMP" COMMAVIEWD_DEVICE_MODEL_FILE="$TMP/model" \
     COMMAVIEWD_DEFERRED_DIR="$TMP/deferred" COMMAVIEWD_BACKUP_ROOT="$TMP/backups" \
-    bash "$INSTALL_SH" "$@" 2>&1)" || rc=$?
+    bash "$INSTALL_SH" "$@" 2>"$TMP/stderr")" || rc=$?
+  stdout="$out"
+  out="$out
+$(cat "$TMP/stderr")"
 }
 
 for args in "" "--tag v0.0.55-alpha" "--current" "--force-offroad"; do
@@ -39,6 +42,9 @@ for args in "" "--tag v0.0.55-alpha" "--current" "--force-offroad"; do
   [[ $rc -eq 43 ]] || fail "install.sh $args on a comma 3 should exit 43, got $rc: $out"
   grep -Fq "CommaView doesn't support the comma 3 (tici)" <<<"$out" || fail "install.sh $args should say the comma 3 isn't supported: $out"
   grep -Fq "comma 3X and comma four are supported" <<<"$out" || fail "install.sh $args should name the supported devices: $out"
+  # What the app reads from the SSH install's output (stdout): the marker line, and the sentence.
+  grep -Fxq "COMMAVIEW_UNSUPPORTED_DEVICE=tici" <<<"$stdout" || fail "install.sh $args should print COMMAVIEW_UNSUPPORTED_DEVICE=tici on its own line to stdout: $stdout"
+  grep -Fq "CommaView doesn't support the comma 3 (tici)" <<<"$stdout" || fail "install.sh $args should say so on stdout: $stdout"
   [[ ! -e "$TMP/curl.log" ]] || fail "install.sh $args on a comma 3 should refuse before any lookup or download: $(cat "$TMP/curl.log")"
 done
 
@@ -47,7 +53,7 @@ run_install "comma tici" --help
 
 run_install "comma tizi" --tag v0.0.55-alpha
 [[ $rc -ne 43 ]] || fail "install.sh should not refuse a comma 3X: $out"
-grep -Fq "doesn't support" <<<"$out" && fail "install.sh should not refuse a comma 3X: $out"
+grep -Fq "COMMAVIEW_UNSUPPORTED_DEVICE" <<<"$out" && fail "install.sh should not refuse a comma 3X: $out"
 [[ -s "$TMP/curl.log" ]] || fail "install.sh on a comma 3X should go on to fetch the release"
 
 grep -Fq 'refuse_unsupported_device "$@"' "$INSTALL_SH" || fail "install.sh should check the device"

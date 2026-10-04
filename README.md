@@ -4,7 +4,7 @@
 
 `commaviewd` is the comma-side C++ runtime for [CommaView](https://commaview.com), plus comma-device install, patch, verification, and release tooling.
 
-CommaView shows your comma's road camera and openpilot or sunnypilot driving overlays on your Android phone, tablet or head unit, over your own network. It works with the comma 3X and comma four; the comma 3 (tici) isn't supported (its openpilot, `release-tici`, is frozen upstream and draws its screen with a different UI), and `install.sh` refuses it (exit 43) before changing anything. The app's guided setup installs this runtime for you.
+CommaView shows your comma's road camera and openpilot or sunnypilot driving overlays on your Android phone, tablet or head unit, over your own network. It works with the comma 3X and comma four; the comma 3 (tici) isn't supported (its openpilot, `release-tici`, is frozen upstream and draws its screen with a different UI), and `install.sh` refuses it before looking anything up or changing anything: it prints `COMMAVIEW_UNSUPPORTED_DEVICE=tici` and a sentence saying so to stdout and exits 43 (`uninstall.sh` still works there). The runtime reports `deviceType` (`tici`, `tizi`, `mici`, or `""`, from the devicetree model) in `/commaview/version`, `/commaview/status` and the discovery reply, so the app can tell a comma 3 from a 3X. The app's guided setup installs this runtime for you.
 
 - [commaview.com](https://commaview.com): what CommaView is, and the beta.
 - [Install guide](https://commaview.com/docs/install).

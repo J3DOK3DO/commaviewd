@@ -16,6 +16,7 @@ assert_contains_fixed '\"type\":\"commaview.discovery.v1\"' "$CONTROL_CPP" 'disc
 assert_contains_fixed '\"apiPort\":' "$CONTROL_CPP" 'discovery response should include API port'
 assert_contains_fixed '\"videoPorts\":{\"road\":8200,\"wide\":8201,\"driver\":8202}' "$CONTROL_CPP" 'discovery response should include stream ports'
 awk '/std::string discovery_response_json\(\)/,/void discovery_responder_loop/' "$CONTROL_CPP" | grep -Fq '\"runtimeVersion\"' || fail 'discovery response should include runtimeVersion compatibility alias'
+awk '/std::string discovery_response_json\(\)/,/void discovery_responder_loop/' "$CONTROL_CPP" | grep -Fq '\"deviceType\"' || fail 'discovery response should include deviceType (tici, tizi or mici)'
 assert_contains_fixed 'std::thread(discovery_responder_loop).detach();' "$CONTROL_CPP" 'control mode should run discovery responder in background'
 assert_contains_fixed 'start_discovery_responder();' "$CONTROL_CPP" 'control mode should start discovery responder with HTTP API'
 

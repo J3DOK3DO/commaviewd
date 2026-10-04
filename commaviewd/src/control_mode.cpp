@@ -230,6 +230,20 @@ std::string device_model() {
   return model.empty() ? "comma" : model;
 }
 
+// Which comma this is, as openpilot tells (HARDWARE.get_device_type(): the devicetree model after
+// "comma "): "tici" (comma 3), "tizi" (comma 3X) or "mici" (comma four); "" on anything else. The
+// comma 3 is reported as itself, never folded into the 3X: CommaView doesn't support it, and the app
+// says so from this.
+std::string device_type() {
+  const char* test_file = std::getenv("COMMAVIEWD_TEST_DEVICE_MODEL_FILE");
+  std::string model = read_file_trimmed(test_file != nullptr ? test_file : "/sys/firmware/devicetree/base/model");
+  model.erase(std::remove(model.begin(), model.end(), '\0'), model.end());
+  const size_t comma = model.rfind("comma ");
+  std::string name = comma == std::string::npos ? model : model.substr(comma + 6);
+  while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+  return name == "tici" || name == "tizi" || name == "mici" ? name : "";
+}
+
 std::string discovery_device_name() {
   const std::string dongle_id = device_dongle_id();
   if (!dongle_id.empty()) return std::string("comma-") + dongle_id;
@@ -641,6 +655,7 @@ std::string discovery_response_json() {
   out << "\"dongle_id\":\"" << json_escape(dongleId) << "\",";
   out << "\"deviceModel\":\"" << json_escape(model) << "\",";
   out << "\"device\":\"" << json_escape(model) << "\",";
+  out << "\"deviceType\":\"" << json_escape(device_type()) << "\",";
   out << "\"hardwareSerial\":\"" << json_escape(hardwareSerial) << "\",";
   out << "\"apiPort\":" << kDefaultApiPort << ",";
   out << "\"api_port\":" << kDefaultApiPort << ",";
@@ -711,6 +726,7 @@ std::string runtime_status_json() {
   out << "\"dongleId\":\"" << json_escape(dongleId) << "\",";
   out << "\"dongle_id\":\"" << json_escape(dongleId) << "\",";
   out << "\"hardwareSerial\":\"" << json_escape(hardwareSerial) << "\",";
+  out << "\"deviceType\":\"" << json_escape(device_type()) << "\",";
   out << "\"api_port\":" << kDefaultApiPort << ",";
   out << "\"telemetryMode\":\"" << json_escape(telemetryMode) << "\",";
   out << "\"roadState\":\"" << (onroad ? "onroad" : "offroad") << "\",";
@@ -2142,6 +2158,7 @@ std::string version_response_json() {
   body << "\"hardwareSerial\":\"" << json_escape(hardwareSerial) << "\",";
   body << "\"deviceModel\":\"" << json_escape(model) << "\",";
   body << "\"device\":\"" << json_escape(model) << "\",";
+  body << "\"deviceType\":\"" << json_escape(device_type()) << "\",";
   body << "\"api_port\":" << kDefaultApiPort << ",";
   body << "\"telemetryMode\":\"" << json_escape(telemetryMode) << "\"}";
   return body.str();
