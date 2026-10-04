@@ -53,6 +53,12 @@ echo patched-again >> "$dir/selfdrive/ui/ui_state.py"
 [[ -f "$dir/.git/reused" ]] || fail "a cached checkout should be reused after its tree was cleaned"
 [[ "$(cat "$dir/selfdrive/ui/ui_state.py")" == ui ]] || fail "a reused checkout should be reset to the commit"
 
+# A partial an interrupted run left beside a complete checkout goes too.
+mkdir -p "$dir.partial-beside"
+touch -d '3 hours ago' "$dir.partial-beside"
+"$CHECKOUT" "$url" "$sha" "$dir" >/dev/null 2>&1
+[[ ! -e "$dir.partial-beside" ]] || fail "a stale partial beside a complete checkout should be removed"
+
 # An older ci-local.sh kept the marker in the tree, and git clean deleted it.
 rm "$dir.complete"
 "$CHECKOUT" "$url" "$sha" "$dir" >/dev/null

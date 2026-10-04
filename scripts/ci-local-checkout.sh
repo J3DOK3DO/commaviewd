@@ -24,6 +24,17 @@ mkdir -p "$(dirname "$dir")"
 exec {lock}>"$dir.lock"
 flock "$lock"
 
+# Partials interrupted runs left, whether or not a complete checkout is beside them.
+for stale in "$dir".partial-*; do
+  [[ -d "$stale" ]] || continue
+  if [[ -f "$stale.owner" ]]; then
+    kill -0 "$(cat "$stale.owner" 2>/dev/null || echo 0)" 2>/dev/null && continue
+  elif [[ -z "$(find "$stale" -maxdepth 0 -mmin +120)" ]]; then
+    continue  # perhaps still being written by an older ci-local.sh
+  fi
+  echo "removing an interrupted checkout: $stale" >&2
+  rm -rf "$stale" "$stale.owner"
+done
 # Checkouts from before the marker moved out of the tree kept it inside, where cleaning the tree
 # deleted it: one at the commit with every submodule checked out is complete.
 complete_without_marker() {
@@ -41,16 +52,6 @@ if [[ -d "$dir" && -f "$dir.complete" ]]; then
   exit 0
 fi
 
-for stale in "$dir".partial-*; do
-  [[ -d "$stale" ]] || continue
-  if [[ -f "$stale.owner" ]]; then
-    kill -0 "$(cat "$stale.owner" 2>/dev/null || echo 0)" 2>/dev/null && continue
-  elif [[ -z "$(find "$stale" -maxdepth 0 -mmin +120)" ]]; then
-    continue  # perhaps still being written by an older ci-local.sh
-  fi
-  echo "removing an interrupted checkout: $stale" >&2
-  rm -rf "$stale" "$stale.owner"
-done
 # Moved in between the move and the marker (an interrupted run), or never finished.
 if [[ -e "$dir" ]]; then
   echo "removing an incomplete checkout: $dir" >&2
