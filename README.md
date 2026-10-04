@@ -118,6 +118,26 @@ within 30 s. `POST /commaview/runtime/uninstall` (paired token; `runtime-uninsta
 queues the installed `uninstall.sh` the same way; it removes the API, its token and the queue with
 it.
 
+Recording records let every paired device make a replay of a recording another one made (the car's
+head unit records, a phone at home makes the replay). A recording is a small JSON journal (which
+drive, which interval, which look) and a thumbnail; the drive itself is the comma's own. A paired
+device saves them with `POST /commaview/recordings/journal?id=<id>` (a JSON object, up to 32 KB) and
+`POST /commaview/recordings/thumb?id=<id>` (a JPEG, up to 256 KB), lists them with
+`GET /commaview/recordings` (newest first, journals included, at most 2 MB) and fetches a
+thumbnail with `GET /commaview/recordings/thumb?id=<id>`; `POST /commaview/recordings/delete?id=<id>`
+removes one. They need the paired token, are taken while driving (a few KB; a recording is stopped
+on the road), and live in `/data/commaview/data/recordings` (owner-only, kept across updates, never
+in a support bundle), where the newest 300 are kept. `/commaview/status` lists `recording-records`
+in `capabilities`.
+
+`GET /commaview/drive-retention?routes=<route>,...` (paired token; never while the car is being
+driven; `drive-retention` in `capabilities`) says how long each drive has before openpilot deletes
+it to make room, so the app can flag a recording whose replay isn't made yet, and say plainly when
+its drive is gone. It follows openpilot's deleter: under 5 GiB or 10% free it removes one segment
+folder at a time in its own order, so a drive goes once the comma has written its headroom plus
+every folder before it. It reads only the drive folder's names (as the deleter does) and measures
+the newest 30 segments for a minute's size, and keeps the listing for 5 minutes.
+
 `comma/install.sh` flags and release env:
 
 | Flag/env | Purpose |

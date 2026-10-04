@@ -5,6 +5,8 @@
 #include "process_watch.h"
 #include "road_phase.h"
 #include "runtime_debug_config.h"
+#include "drive_retention.h"
+#include "recording_records.h"
 #include "source_recording_archive.h"
 #include "support_bundle.h"
 
@@ -718,7 +720,7 @@ std::string runtime_status_json() {
   // openpilot processes down now, and the last one the process watcher saw go down.
   out << "\"processEvents\":" << process_watch_status_json() << ",";
   // What this runtime can do for a paired phone without SSH.
-  out << "\"capabilities\":[\"runtime-update\",\"runtime-uninstall\"],";
+  out << "\"capabilities\":[\"runtime-update\",\"runtime-uninstall\",\"recording-records\",\"drive-retention\"],";
   out << "\"onroadUiExport\":" << live_onroad_ui_export_status_json(false) << ",";
   out << "\"persistedConfig\":" << commaview::runtime_debug::render_config_json(persisted, true) << ",";
   out << "\"effectiveConfig\":" << commaview::runtime_debug::render_config_json(effective, true) << ",";
@@ -2140,7 +2142,31 @@ commaview::api::HttpResponse handle_source_recording_get(const commaview::api::H
   return source_recording_archive_response(req.path);
 }
 
+// Recording records (recording_records.h) are private to the comma's paired devices. Saving one is
+// a few KB, so it's taken while driving too: a recording is stopped on the road.
+commaview::api::HttpResponse handle_recording_records(const commaview::api::HttpRequest& req,
+                                                      const std::string& api_token) {
+  if (api_token.empty() || !is_authorized(req, api_token)) {
+    return make_json(401, kUnauthorizedJson);
+  }
+  return commaview::runtime::recording_records_response(req.method, req.path, req.body,
+                                                        drivelog_path("data/recordings"));
+}
+
 commaview::api::HttpResponse handle_get(const commaview::api::HttpRequest& req, const std::string& api_token) {
+  if (commaview::runtime::is_recording_records_path(req.path)) {
+    return handle_recording_records(req, api_token);
+  }
+  if (req.path == "/commaview/drive-retention" || req.path.rfind("/commaview/drive-retention?", 0) == 0) {
+    // How long each drive has before openpilot deletes it (drive_retention.h). Never while driving.
+    if (api_token.empty() || !is_authorized(req, api_token)) {
+      return make_json(401, kUnauthorizedJson);
+    }
+    if (being_driven()) {
+      return make_json(403, "{\"ok\":false,\"error\":\"parked or offroad required\"}");
+    }
+    return commaview::runtime::drive_retention_response(req.path);
+  }
   if (req.path.rfind("/commaview/source-recording/", 0) == 0) {
     return handle_source_recording_get(req, api_token);
   }
@@ -2194,6 +2220,10 @@ commaview::api::HttpResponse handle_post(const commaview::api::HttpRequest& req,
   // Everything below /pairing/redeem needs the token, including unknown paths.
   if (!is_authorized(req, api_token)) {
     return make_json(401, kUnauthorizedJson);
+  }
+
+  if (commaview::runtime::is_recording_records_path(req.path)) {
+    return handle_recording_records(req, api_token);
   }
 
   if (req.path == "/pairing/create") {
