@@ -95,6 +95,8 @@ def main():
             COMMAVIEWD_TEST_INSTALL_SCRIPT=str(root / "install.sh"),
             COMMAVIEWD_TEST_UNINSTALL_SCRIPT=str(root / "uninstall.sh"),
             COMMAVIEWD_ROAD_PHASE_BIN=str(root / "no-commaviewd"),
+            COMMAVIEWD_UI_EXPORT_SOCKET=str(run / "ui-export.sock"),
+            COMMAVIEWD_RECIPE_DIR=str(root / "recipes"),
         )
         (root / "install.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
         (root / "uninstall.sh").write_text("#!/usr/bin/env bash\necho uninstalling\n")
@@ -211,6 +213,50 @@ def main():
             assert args[:2] == [b"bash", str(deferred / "job" / "uninstall.sh").encode()], args
             assert (deferred / "job" / "uninstall.sh").read_text() == (root / "uninstall.sh").read_text()
             print("PASS: /commaview/runtime/uninstall queues the installed uninstaller, paired phone only")
+
+            # --- the stage a queued install has reached ---------------------------------------
+            code, status = request(port, "/commaview/status")
+            assert not {"stage", "stageDetail", "stageAtMs"} & set(status["deferredMaintenance"]), status
+            (deferred / "progress.json").write_text('{"stage":"verifying","detail":"v0.0.57-alpha.1","atMs":1759579200123}\n')
+            code, status = request(port, "/commaview/status")
+            maintenance = status["deferredMaintenance"]
+            assert maintenance["state"] == "waiting" and maintenance["action"] == "uninstall", maintenance
+            assert maintenance["stage"] == "verifying" and maintenance["stageDetail"] == "v0.0.57-alpha.1", maintenance
+            assert maintenance["stageAtMs"] == 1759579200123, maintenance
+            (deferred / "progress.json").write_text('{"stage":"rolled_back","detail":"","atMs":5}\n')
+            assert request(port, "/commaview/status")[1]["deferredMaintenance"]["stage"] == "rolled_back"
+            (deferred / "progress.json").write_text('{"stage":"no good","atMs":5}\n')
+            assert "stage" not in request(port, "/commaview/status")[1]["deferredMaintenance"]
+            (deferred / "progress.json").unlink()
+            print("PASS: deferredMaintenance carries a queued install's stage, stageDetail and stageAtMs")
+
+            # --- helpers inherit none of control's sockets ---------------------------------------
+            fd_report = root / "runner-fds.txt"
+            fake_runner = root / "fake-runner.sh"
+            fake_runner.write_text(f'#!/usr/bin/env bash\nls -l /proc/$$/fd > "{fd_report}"\necho \'{{"state":"waiting"}}\'\n')
+            fake_runner.chmod(0o755)
+            fd_port = free_port()
+            fd_control = start_control(binary, dict(env, COMMAVIEWD_TEST_DEFERRED_RUNNER=str(fake_runner)), fd_port)
+            try:
+                code, body = request(fd_port, "/commaview/runtime/uninstall", "POST", {})
+                assert code == 202, (code, body)
+                links = fd_report.read_text()
+                # stdin, stdout and stderr (the pipes control reads), and bash's own script descriptor.
+                assert {line.split()[-3] for line in links.splitlines() if "->" in line} <= {"0", "1", "2", "255"}, links
+            finally:
+                fd_control.terminate()
+                fd_control.wait(timeout=5)
+            print("PASS: a helper control starts keeps none of its sockets (listener, connection, discovery)")
+
+            # --- one bridge, and it stops promptly on SIGTERM ---------------------------------
+            second = subprocess.run([str(binary), "bridge"], env=env, capture_output=True, text=True, timeout=10)
+            assert second.returncode == 3 and "another CommaView bridge is running" in second.stderr, second
+            assert (run / "ui-export.sock").is_socket(), "a second bridge must not touch the running one's socket"
+            stop_started = time.monotonic()
+            bridge.send_signal(signal.SIGTERM)
+            assert bridge.wait(timeout=3) == 143
+            assert time.monotonic() - stop_started < 2
+            print("PASS: a second bridge exits untouched, and the bridge stops at once on SIGTERM")
         finally:
             subprocess.run(["bash", str(RUNNER), "cancel"], env=env, check=False, capture_output=True)
             control.terminate()

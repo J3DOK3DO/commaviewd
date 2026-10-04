@@ -1,5 +1,6 @@
 #include "framing.h"
 #include "msgq_ring_reader.h"
+#include "process_hygiene.h"
 #include "socket.h"
 #include "policy.h"
 #include "router.h"
@@ -1273,7 +1274,7 @@ static void accept_loop(int server_fd, const char* service_name, int port) {
   while (g_running) {
     struct sockaddr_in client_addr = {};
     socklen_t addr_len = sizeof(client_addr);
-    int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
+    int client_fd = accept4(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len, SOCK_CLOEXEC);
     if (client_fd < 0) {
       if (g_running) perror("accept");
       continue;
@@ -1286,17 +1287,23 @@ static void accept_loop(int server_fd, const char* service_name, int port) {
   }
 }
 
-static void sig_handler(int) { g_running = false; }
-
 int commaview_bridge_main(int argc, char* argv[]) {
-  signal(SIGINT, sig_handler);
-  signal(SIGTERM, sig_handler);
   signal(SIGPIPE, SIG_IGN);
-  // Before any thread starts, so every thread inherits the mask and only the reload thread takes it.
+  // Before any thread starts, so every thread inherits the mask: SIGHUP is taken by the reload
+  // thread, SIGINT and SIGTERM by this one (sigwait below), never by a thread blocked in accept().
+  // A handler would interrupt only whichever thread the kernel picked, and accept() restarts after
+  // it, so stop.sh used to wait out its 5 seconds and SIGKILL the bridge.
   sigset_t reload_signals;
   sigemptyset(&reload_signals);
   sigaddset(&reload_signals, SIGHUP);
-  pthread_sigmask(SIG_BLOCK, &reload_signals, nullptr);
+  sigset_t stop_signals;
+  sigemptyset(&stop_signals);
+  sigaddset(&stop_signals, SIGINT);
+  sigaddset(&stop_signals, SIGTERM);
+  sigset_t blocked = reload_signals;
+  sigaddset(&blocked, SIGINT);
+  sigaddset(&blocked, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &blocked, nullptr);
 
   (void)argc;
   (void)argv;
@@ -1307,6 +1314,11 @@ int commaview_bridge_main(int argc, char* argv[]) {
     return 2;
   }
   g_livestream_video_enabled = source != nullptr && std::strcmp(source, "livestream") == 0;
+  // A second bridge would unlink the running one's UI export socket before its own bind failed.
+  if (!commaview::runtime::hold_instance_lock(commaview::ui_export::default_socket_path() + ".lock")) {
+    fprintf(stderr, "another CommaView bridge is running; exiting\n");
+    return 3;
+  }
   initialize_runtime_state_once();
   append_runtime_run_event("process_start");
   std::thread(config_reload_signal_loop).detach();
@@ -1344,13 +1356,22 @@ int commaview_bridge_main(int argc, char* argv[]) {
   printf("ready. waiting for connections...\n");
   fflush(stdout);
 
+  int stop_signal = 0;
+  while (sigwait(&stop_signals, &stop_signal) != 0) {
+  }
+  g_running = false;
+  // shutdown() wakes a thread blocked in accept(); close() alone may not.
+  for (int fd : server_fds) shutdown(fd, SHUT_RDWR);
   for (auto& t : threads) t.join();
   for (int fd : server_fds) close(fd);
   if (g_ui_export_socket != nullptr) g_ui_export_socket->stop();
 
   append_runtime_run_event("process_stop");
-  printf("CommaView Bridge stopped.\n");
-  return 0;
+  printf("CommaView Bridge stopped (signal %d).\n", stop_signal);
+  fflush(nullptr);
+  // Client threads are detached and may still be finishing: leave without running static
+  // destructors under them. 128 + signal, as a shell reports a process stopped by it.
+  std::_Exit(128 + stop_signal);
 }
 #ifndef COMMAVIEW_BRIDGE_NO_MAIN
 int main(int argc, char* argv[]) {
