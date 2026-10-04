@@ -34,6 +34,9 @@ PROC_ROOT="${COMMAVIEWD_PROC_ROOT:-/proc}"
 STABLE_SEC="${COMMAVIEWD_DEFERRED_OFFROAD_STABLE_SEC:-60}"
 PARKED_STABLE_SEC="${COMMAVIEWD_DEFERRED_PARKED_STABLE_SEC:-20}"
 ROAD_PHASE_BIN="${COMMAVIEWD_ROAD_PHASE_BIN:-/data/commaview/commaviewd}"
+# A queued first install has no runtime installed to ask: install.sh keeps the release's own
+# road-phase (the binary and its lib/) here for it.
+ROAD_PHASE_KIT="${COMMAVIEWD_ROAD_PHASE_KIT:-$STATE_DIR/road-phase}"
 POLL_SEC="${COMMAVIEWD_DEFERRED_POLL_SEC:-10}"
 REQUIRE_MANAGER="${COMMAVIEWD_DEFERRED_REQUIRE_MANAGER:-1}"
 # A job that finds the car being driven when it starts (exit 42) goes back to waiting, this often.
@@ -121,14 +124,26 @@ manager_running() {
   return 1
 }
 
+# The road-phase to ask: the installed runtime's, else the one a queued first install kept.
+road_phase_bin() {
+  if [ -x "$ROAD_PHASE_BIN" ]; then
+    printf '%s\n' "$ROAD_PHASE_BIN"
+  elif [ -x "$ROAD_PHASE_KIT/commaviewd" ]; then
+    printf '%s\n' "$ROAD_PHASE_KIT/commaviewd"
+  else
+    return 1
+  fi
+}
+
 # offroad, parked or driving. Parked is commaviewd road-phase's call; a runtime without it (or one
 # that can't tell) leaves onroad as driving.
 maintenance_phase() {
+  local bin
   if ! manager_running; then
     echo driving
   elif openpilot_offroad; then
     echo offroad
-  elif [ -x "$ROAD_PHASE_BIN" ] && [ "$(timeout 5 "$ROAD_PHASE_BIN" road-phase 2>/dev/null | cut -d' ' -f1)" = "parked" ]; then
+  elif bin="$(road_phase_bin)" && [ "$(timeout 5 "$bin" road-phase 2>/dev/null | cut -d' ' -f1)" = "parked" ]; then
     echo parked
   else
     echo driving
@@ -364,6 +379,8 @@ cmd_cancel() {
   fi
   rm -f "$PROGRESS"
   rm -f "$STATE_DIR/waiter.pid"
+  # Only a queued first install needs it; a direct run or another job doesn't.
+  rm -rf "$ROAD_PHASE_KIT"
 }
 
 case "${1:-}" in
