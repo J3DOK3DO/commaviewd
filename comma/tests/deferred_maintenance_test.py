@@ -223,8 +223,10 @@ def test_install_while_onroad_refuses_or_queues_never_forces(tmp_path):
     (companions / "scripts" / "run_when_offroad.sh").write_text(RUNNER.read_text())
     text = (REPO_ROOT / "comma" / "install.sh").read_text()
     functions = "".join(shell_function(text, name) for name in (
-        "read_is_onroad", "read_is_driving", "queue_install_until_offroad", "cancel_deferred_maintenance",
-        "ensure_offroad_ready"))
+        "read_is_onroad", "road_phase_bin", "read_is_driving", "keep_road_phase_kit", "queue_install_until_offroad",
+        "cancel_deferred_maintenance", "ensure_offroad_ready"))
+    # The check after the download: a release staged (this stand-in has no road-phase of its own).
+    (tmp_path / "staged").mkdir()
 
     def ensure(force):
         script = f"""
@@ -236,6 +238,8 @@ DEFERRED_DIR={tmp_path / 'deferred'}
 DEFERRED_EXIT=75
 RELEASE_TAG=v9.9.9
 ROAD_PHASE_BIN="$COMMAVIEWD_ROAD_PHASE_BIN"
+ROAD_PHASE_KIT={tmp_path / 'deferred' / 'road-phase'}
+STAGED_BUNDLE={tmp_path / 'staged'}
 FORCE_OFFROAD={1 if force else 0}
 {functions}
 ensure_offroad_ready
@@ -479,7 +483,8 @@ def run_install_flow(tmp_path, body, **env_extra):
     deferred = tmp_path / "deferred"
     deferred.mkdir(exist_ok=True)
     functions = install_functions(
-        "error", "now_ms", "stage", "read_param", "read_is_onroad", "read_is_driving", "queue_install_until_offroad",
+        "error", "now_ms", "stage", "read_param", "read_is_onroad", "road_phase_bin", "read_is_driving",
+        "keep_road_phase_kit", "queue_install_until_offroad",
         "cancel_deferred_maintenance", "ensure_offroad_ready", "restore_previous_install_tree",
         "revert_onroad_ui_export_after_failed_install", "cleanup", "without_maint_lock_fd")
     install_dir = tmp_path / "commaview"
@@ -495,6 +500,8 @@ FORCE_OFFROAD=0
 RELEASE_TAG=v9.9.9
 COMPANION_DIR={tmp_path / 'companions'}
 ROAD_PHASE_BIN={tmp_path / 'no-commaviewd'}
+ROAD_PHASE_KIT={deferred / 'road-phase'}
+STAGED_BUNDLE=""
 tmpdir={tmp_path / 'tmp'}
 mkdir -p "$tmpdir"
 INSTALL_BACKUP_DIR=""
@@ -566,6 +573,7 @@ stage starting
 ensure_offroad_ready
 stage downloading v9.9.9
 echo 0 > "$PARAMS_DIR/IsOffroad"   # driven off during the download
+STAGED_BUNDLE="$tmpdir/staged-bundle"; mkdir -p "$STAGED_BUNDLE"
 ensure_offroad_ready
 stage installing
 touch {mutated}
@@ -598,3 +606,93 @@ def test_unknown_road_state_is_onroad_for_every_script(tmp_path):
         out = subprocess.run(["bash", "-c", f"PARAMS_DIR={tmp_path / 'none'}\n{functions}\nread_is_onroad"],
                              capture_output=True, text=True, check=True).stdout.strip()
         assert out == "0", rel
+
+
+def test_first_install_tells_park_from_driving_with_the_release_itself(tmp_path):
+    """Nothing installed yet: the install asks the release it downloaded, and a queued first install
+    keeps that release's road-phase beside the queue so the queue can see Park too."""
+    env = env_for(tmp_path)  # no installed runtime: COMMAVIEWD_ROAD_PHASE_BIN doesn't exist
+    set_offroad(tmp_path, "0")
+    marker = tmp_path / "installed"
+    companions = tmp_path / "companions"
+    (companions / "scripts").mkdir(parents=True)
+    (companions / "install.sh").write_text(f'#!/usr/bin/env bash\necho "$@" > "{marker}"\n')
+    (companions / "scripts" / "run_when_offroad.sh").write_text(RUNNER.read_text())
+    # The downloaded release, unpacked: a commaviewd whose road-phase answers tmp_path/phase, and its lib/.
+    phase = tmp_path / "phase"
+    phase.write_text("driving not-in-park")
+    staged = tmp_path / "staged"
+    (staged / "lib").mkdir(parents=True)
+    (staged / "lib" / "libkj-1.0.1.so").write_text("lib")
+    release = staged / "commaviewd"
+    release.write_text(
+        "#!/usr/bin/env bash\n"
+        '[ "$1" = road-phase ] || exit 2\n'
+        f'read -r p reason < "{phase}"\n'
+        'echo "$p $reason"\n'
+        '[ "$p" != driving ]\n'
+    )
+    release.chmod(0o755)
+    kit = tmp_path / "deferred" / "road-phase"
+    functions = install_functions(
+        "read_is_onroad", "road_phase_bin", "read_is_driving", "keep_road_phase_kit", "queue_install_until_offroad",
+        "cancel_deferred_maintenance", "ensure_offroad_ready")
+
+    def ensure(force, staged_bundle):
+        script = f"""
+set -euo pipefail
+PARAMS_DIR={tmp_path / 'params'}
+read_param() {{ [ -f "$PARAMS_DIR/$1" ] && tr -d '\\000\\r\\n' < "$PARAMS_DIR/$1" || true; }}
+COMPANION_DIR={companions}
+DEFERRED_DIR={tmp_path / 'deferred'}
+DEFERRED_EXIT=75
+RELEASE_TAG=v9.9.9
+ROAD_PHASE_BIN="$COMMAVIEWD_ROAD_PHASE_BIN"
+ROAD_PHASE_KIT={kit}
+STAGED_BUNDLE={staged_bundle}
+FORCE_OFFROAD={1 if force else 0}
+{functions}
+ensure_offroad_ready
+echo proceeding
+"""
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+
+    try:
+        # Before the download nothing can tell, so it downloads instead of refusing or queueing.
+        first = ensure(True, '""')
+        assert first.returncode == 0 and "proceeding" in first.stdout, first.stdout + first.stderr
+        assert "checking again after the download" in first.stdout
+        assert status(env)["state"] == "none"
+        # After it: in Park with the car on, it installs now.
+        phase.write_text("parked parked")
+        assert ensure(True, str(staged)).returncode == 0
+        # Driven: refused without --force-offroad, queued with it, keeping the release's road-phase.
+        phase.write_text("driving not-in-park")
+        assert ensure(False, str(staged)).returncode == 42
+        queued = ensure(True, str(staged))
+        assert queued.returncode == 75, queued.stdout + queued.stderr
+        assert status(env)["state"] == "waiting"
+        assert os.access(kit / "commaviewd", os.X_OK) and (kit / "lib" / "libkj-1.0.1.so").exists()
+        # The queue asks the kept road-phase: still driving, it waits; in Park, the install runs.
+        time.sleep(3.5)
+        assert not marker.exists(), "ran while driving"
+        phase.write_text("parked parked")
+        assert wait_for(lambda: status(env)["state"] == "done")
+        assert marker.read_text().split() == ["--tag", "v9.9.9"]
+        assert not (tmp_path / "params" / "OffroadMode").exists()
+        # Cancelling (or a direct run, which cancels) drops the kept copy.
+        phase.write_text("driving not-in-park")
+        assert ensure(True, str(staged)).returncode == 75 and kit.exists()
+        run(env, "cancel")
+        assert not kit.exists()
+    finally:
+        run(env, "cancel", check=False)
+
+
+def test_install_drops_the_kept_road_phase_once_installed():
+    text = INSTALL_SH.read_text()
+    main = text[text.index('tmpdir="$(mktemp -d /tmp/commaview-install.XXXXXX)"'):]
+    assert main.index('rm -rf "$ROAD_PHASE_KIT"') > main.index("INSTALL_SUCCESS=1")
+    # The kept copy is made before the job is queued, so the waiter can use it from its first poll.
+    queue = shell_function(text, "queue_install_until_offroad")
+    assert queue.index("keep_road_phase_kit") < queue.index('"$runner" queue install')
