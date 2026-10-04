@@ -105,6 +105,11 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   "$ROOT/src/recording_records.cpp" \
   -o "$TMP/test_recording_records"
 
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
+  "$ROOT/tests/test_drive_retention.cpp" \
+  "$ROOT/src/drive_retention.cpp" \
+  -o "$TMP/test_drive_retention"
+
 # The generated cereal sources the build step just wrote, for tests that read real events.
 CEREAL_SRCS=( "$OP_SOURCE_ROOT/cereal/gen/cpp/log.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/car.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/custom.capnp.c++" )
 for legacy in deprecated legacy; do
@@ -182,6 +187,7 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
 "$TMP/test_ui_export_socket"
 "$TMP/test_source_recording_archive"
 "$TMP/test_recording_records"
+"$TMP/test_drive_retention"
 "$TMP/test_msgq_header_recovery"
 "$TMP/test_msgq_ring_reader"
 "$TMP/test_gps_peek"

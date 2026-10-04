@@ -130,6 +130,14 @@ on the road), and live in `/data/commaview/data/recordings` (owner-only, kept ac
 in a support bundle), where the newest 300 are kept. `/commaview/status` lists `recording-records`
 in `capabilities`.
 
+`GET /commaview/drive-retention?routes=<route>,...` (paired token; never while the car is being
+driven; `drive-retention` in `capabilities`) says how long each drive has before openpilot deletes
+it to make room, so the app can flag a recording whose replay isn't made yet, and say plainly when
+its drive is gone. It follows openpilot's deleter: under 5 GiB or 10% free it removes one segment
+folder at a time in its own order, so a drive goes once the comma has written its headroom plus
+every folder before it. It reads only the drive folder's names (as the deleter does) and measures
+the newest 30 segments for a minute's size, and keeps the listing for 5 minutes.
+
 `comma/install.sh` flags and release env:
 
 | Flag/env | Purpose |

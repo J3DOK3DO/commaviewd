@@ -119,6 +119,36 @@ def main():
             status, _, body = request(port, "/commaview/recordings", token=token)
             assert json.loads(body)["recordings"] == []
             assert list(saved.iterdir()) == []
+
+            # How long drives have before openpilot deletes them: not while driving.
+            assert "drive-retention" in json.loads(request(port, "/commaview/status")[2])["capabilities"]
+            assert request(port, "/commaview/drive-retention?routes=000004b4--75e1f0ba8f")[0] == 401
+            assert request(port, "/commaview/drive-retention?routes=000004b4--75e1f0ba8f", token=token)[0] == 403
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+        # Offroad: each asked-for drive, present or not, with the drive folder's figures.
+        realdata = root / "realdata"
+        for segment in range(2):
+            folder = realdata / f"000004b4--75e1f0ba8f--{segment}"
+            folder.mkdir(parents=True)
+            (folder / "fcamera.hevc").write_bytes(b"x" * 8192)
+        (params / "IsOffroad").write_text("1")
+        port = free_port()
+        process = start_control(binary, dict(base_env, COMMAVIEWD_API_TOKEN=token,
+                                             COMMAVIEWD_SOURCE_ARCHIVE_ROOT=str(realdata)), port)
+        try:
+            status, _, body = request(port, "/commaview/drive-retention?routes=000004b4--75e1f0ba8f,000004b5--gone",
+                                      token=token)
+            retention = json.loads(body)
+            assert status == 200 and retention["ok"] is True, body
+            assert retention["deleteBelowBytes"] >= 5 * 1024 ** 3 and retention["bytesPerMinute"] > 0
+            present, gone = retention["routes"]
+            assert present["route"] == "000004b4--75e1f0ba8f" and present["present"] is True
+            assert present["segments"] == 2 and isinstance(present["drivingMinutesLeft"], int)
+            assert gone == {"route": "000004b5--gone", "present": False}
+            assert request(port, "/commaview/drive-retention?routes=../etc", token=token)[0] == 400
         finally:
             process.terminate()
             process.wait(timeout=5)
