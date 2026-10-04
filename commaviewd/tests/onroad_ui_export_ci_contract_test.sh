@@ -55,26 +55,27 @@ done
 
 CI_TARGETS="$REPO_ROOT/ci/targets.json"
 assert_contains_fixed '"name": "openpilot-release-mici"' "$CI_TARGETS" "commaviewd CI should run openpilot stable MICI release"
-assert_contains_fixed '"name": "openpilot-release-tici"' "$CI_TARGETS" "commaviewd CI should cover openpilot stable TICI release"
-assert_contains_fixed '"run_verification": false' "$CI_TARGETS" "legacy openpilot TICI release should skip runtime verification"
+assert_not_contains_fixed 'release-tici' "$CI_TARGETS" "commaviewd CI should not check the unsupported comma 3 (release-tici)"
+assert_contains_fixed '"upstream_ref": "release-mici-staging"' "$CI_TARGETS" "commaviewd CI should cover openpilot and sunnypilot MICI staging"
+assert_contains_fixed '"upstream_ref": "release-tizi-staging"' "$CI_TARGETS" "commaviewd CI should cover openpilot and sunnypilot TIZI staging"
+assert_contains_fixed '"upstream_ref": "release-chestnut-staging"' "$CI_TARGETS" "commaviewd CI should cover openpilot chestnut staging"
+assert_contains_fixed '"upstream_ref": "staging-chestnut"' "$CI_TARGETS" "commaviewd CI should cover sunnypilot chestnut staging"
 assert_contains_fixed '"name": "sunnypilot-release-mici"' "$CI_TARGETS" "commaviewd CI should run sunnypilot stable MICI release"
 assert_contains_fixed '"name": "sunnypilot-release-tizi"' "$CI_TARGETS" "commaviewd CI should run sunnypilot stable TIZI release"
 assert_contains_fixed '--platform "${{ matrix.target.ui_platform }}"' "$VERIFY" "commaviewd CI should pass explicit platform for release refs"
-assert_contains_fixed '"upstream_ref": "nightly"' "$OPENPILOT_TARGETS" "openpilot canary should cover nightly drift"
-assert_contains_fixed '"upstream_ref": "nightly-dev"' "$OPENPILOT_TARGETS" "openpilot canary should cover nightly-dev drift"
-assert_contains_fixed '"upstream_ref": "master"' "$OPENPILOT_TARGETS" "openpilot canary should cover current master drift"
+# The canaries run the bleeding edge (staging is in CI): openpilot's nightlies, sunnypilot's dev.
+for ref in nightly nightly-dev nightly-chestnut nightly-chestnut-dev; do
+  assert_contains_fixed "\"upstream_ref\": \"$ref\"" "$OPENPILOT_TARGETS" "openpilot canary should cover $ref drift"
+done
 assert_contains_fixed '"run_verification": false' "$OPENPILOT_TARGETS" "openpilot nightly canaries should be patch-applicability only"
-assert_contains_fixed '"upstream_ref": "release-mici-staging"' "$OPENPILOT_TARGETS" "openpilot canary should cover MICI staging drift"
-assert_contains_fixed '"upstream_ref": "release-tizi-staging"' "$OPENPILOT_TARGETS" "openpilot canary should cover TIZI staging drift"
-assert_contains_fixed '"upstream_ref": "release-chestnut-staging"' "$OPENPILOT_TARGETS" "openpilot canary should cover chestnut staging drift"
 assert_contains_fixed 't.get("run_verification", True) is not False' "$REPO_ROOT/ci/plan-targets.py" "canaries should run verification unless a target opts out"
 assert_not_contains_fixed 'run_verification != false }}' "$VERIFY" "verification must not compare run_verification with != false (an unset key skips verification)"
 assert_contains_fixed '"upstream_ref": "dev"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover early dev drift"
-assert_contains_fixed '"upstream_ref": "master"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover current master drift"
-assert_contains_fixed '"upstream_ref": "staging"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover aggregate staging drift"
-assert_contains_fixed '"upstream_ref": "release-mici-staging"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover MICI staging drift"
-assert_contains_fixed '"upstream_ref": "release-tizi-staging"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover TIZI staging drift"
-assert_contains_fixed '"upstream_ref": "staging-chestnut"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover chestnut staging drift"
+assert_contains_fixed '"upstream_ref": "dev-chestnut"' "$SUNNYPILOT_TARGETS" "sunnypilot canary should cover chestnut dev drift"
+for targets in "$OPENPILOT_TARGETS" "$SUNNYPILOT_TARGETS"; do
+  assert_not_contains_fixed 'staging' "$targets" "$targets: staging belongs to CI (ci/targets.json), not the canaries"
+  assert_not_contains_fixed 'tici' "$targets" "$targets: the comma 3 (tici) isn't supported"
+done
 assert_contains_fixed "./commaviewd/scripts/upstream-interface-guard.sh --telemetry-only" "$VERIFY" "every target should run the semantic interface guard, even when runtime verification is skipped"
 
 for patch in "$REPO_ROOT/comma/patches/openpilot/0001-commaview-ui-export-v2.patch" "$REPO_ROOT/comma/patches/sunnypilot/0001-commaview-ui-export-v2.patch"; do

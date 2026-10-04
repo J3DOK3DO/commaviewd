@@ -92,6 +92,33 @@ resolve_release_inputs() {
   fi
 }
 
+# The comma 3 (tici) isn't supported: refuse before looking anything up, downloading or touching
+# the device. openpilot reads which comma this is from the devicetree model ("comma tici", "comma
+# tizi", "comma mici"; system/hardware HARDWARE.get_device_type()). uninstall.sh still works there.
+UNSUPPORTED_DEVICE_EXIT=43
+refuse_unsupported_device() {
+  local model_file="${COMMAVIEWD_DEVICE_MODEL_FILE:-/sys/firmware/devicetree/base/model}"
+  local arg model
+  for arg in "$@"; do
+    case "$arg" in -h|--help) return 0 ;; esac
+  done
+  [ -f "$model_file" ] || return 0
+  model="$(tr -d '\000\r\n' < "$model_file" 2>/dev/null || true)"
+  case "$model" in
+    *tici*|*TICI*)
+      # The app reads either line from the SSH install's output: the marker, or the sentence.
+      echo "COMMAVIEW_UNSUPPORTED_DEVICE=tici"
+      echo "CommaView doesn't support the comma 3 (tici): its openpilot release (release-tici) is frozen upstream and draws its screen differently. comma 3X and comma four are supported."
+      echo "ERROR: CommaView doesn't support the comma 3 (tici)." >&2
+      if [ -f /data/commaview/uninstall.sh ]; then
+        echo "To remove an earlier CommaView install: bash /data/commaview/uninstall.sh" >&2
+      fi
+      exit "$UNSUPPORTED_DEVICE_EXIT"
+      ;;
+  esac
+}
+refuse_unsupported_device "$@"
+
 # --tag and --current pick the release while the arguments are parsed, so only look up the
 # default (which needs the network) when neither is given.
 default_release_needed=1
@@ -155,6 +182,8 @@ Options:
   --force-offroad                While driving, queue the install to run once the car is parked or offroad
                                  (exit 75) instead of refusing it (exit 42). Never asks openpilot to go offroad.
   -h, --help                     Show this help and exit.
+
+Exits 43 without changing anything on a comma 3 (tici), which CommaView doesn't support.
 
 Without --tag or --current, installs the runtime paired with the current CommaView app
 release, or the newest GitHub release if that lookup fails.

@@ -4,7 +4,7 @@
 
 `commaviewd` is the comma-side C++ runtime for [CommaView](https://commaview.com), plus comma-device install, patch, verification, and release tooling.
 
-CommaView shows your comma's road camera and openpilot or sunnypilot driving overlays on your Android phone, tablet or head unit, over your own network. It works with the comma 3X and comma four. The app's guided setup installs this runtime for you.
+CommaView shows your comma's road camera and openpilot or sunnypilot driving overlays on your Android phone, tablet or head unit, over your own network. It works with the comma 3X and comma four; the comma 3 (tici) isn't supported (its openpilot, `release-tici`, is frozen upstream and draws its screen with a different UI), and `install.sh` refuses it before looking anything up or changing anything: it prints `COMMAVIEW_UNSUPPORTED_DEVICE=tici` and a sentence saying so to stdout and exits 43 (`uninstall.sh` still works there). The runtime reports `deviceType` (`tici`, `tizi`, `mici`, or `""`, from the devicetree model) in `/commaview/version`, `/commaview/status` and the discovery reply, so the app can tell a comma 3 from a 3X. The app's guided setup installs this runtime for you.
 
 - [commaview.com](https://commaview.com): what CommaView is, and the beta.
 - [Install guide](https://commaview.com/docs/install).
@@ -201,8 +201,8 @@ These scripts install the direct v2 socket exporter into upstream openpilot/sunn
 
 | Script | Usage | Flags/env |
 | --- | --- | --- |
-| `comma/scripts/verify_onroad_ui_export_patch.sh` | `bash /data/commaview/scripts/verify_onroad_ui_export_patch.sh [--json] [--platform auto\|mici\|tizi\|tici]` | Always prints the status JSON (`--json` is accepted for callers), including `uiReloadPending`/`uiReloadAction`/`uiReloadReason` (below). `COMMAVIEWD_INSTALL_DIR` overrides `/data/commaview`; `COMMAVIEWD_OP_ROOT` overrides `/data/openpilot`; `COMMAVIEWD_PROC_ROOT` overrides `/proc` (tests). |
-| `comma/scripts/apply_onroad_ui_export_patch.sh` | `bash /data/commaview/scripts/apply_onroad_ui_export_patch.sh [--force-offroad] [--force-repair] [--before-openpilot] [--platform auto\|mici\|tizi\|tici]` | Refuses while driving (exit 42); `--force-offroad` is accepted from older callers and changes nothing. `--force-repair` is the only destructive repair path; it backs up targets before reset/reapply. `--before-openpilot` is for the boot hook: when no openpilot manager or UI process is running it skips the onroad check (`IsOffroad` still holds the last session's value until manager clears it) and patches the tree `launch_chffrplus.sh` is about to run, which is `/data/safe_staging/finalized` when a staged openpilot update is about to be installed; when openpilot is running it keeps the onroad check. `COMMAVIEWD_SKIP_OPENPILOT_UI_RESTART=1` skips the UI reload bookkeeping. `COMMAVIEWD_PARAMS_DIR`, `COMMAVIEWD_PROC_ROOT`, `COMMAVIEWD_STAGING_ROOT` override `/data/params/d`, `/proc`, `/data/safe_staging` (tests). |
+| `comma/scripts/verify_onroad_ui_export_patch.sh` | `bash /data/commaview/scripts/verify_onroad_ui_export_patch.sh [--json] [--platform auto\|mici\|tizi]` | Always prints the status JSON (`--json` is accepted for callers); on a comma 3 (tici, `--platform tici` or detected from the devicetree model) it reports `"state": "unsupported-device"` and exits 43. including `uiReloadPending`/`uiReloadAction`/`uiReloadReason` (below). `COMMAVIEWD_INSTALL_DIR` overrides `/data/commaview`; `COMMAVIEWD_OP_ROOT` overrides `/data/openpilot`; `COMMAVIEWD_PROC_ROOT` overrides `/proc`, `COMMAVIEWD_DEVICE_MODEL_FILE` the devicetree model (tests). |
+| `comma/scripts/apply_onroad_ui_export_patch.sh` | `bash /data/commaview/scripts/apply_onroad_ui_export_patch.sh [--force-offroad] [--force-repair] [--before-openpilot] [--platform auto\|mici\|tizi]` | Refuses a comma 3 (tici) with exit 43 before touching anything. Refuses while driving (exit 42); `--force-offroad` is accepted from older callers and changes nothing. `--force-repair` is the only destructive repair path; it backs up targets before reset/reapply. `--before-openpilot` is for the boot hook: when no openpilot manager or UI process is running it skips the onroad check (`IsOffroad` still holds the last session's value until manager clears it) and patches the tree `launch_chffrplus.sh` is about to run, which is `/data/safe_staging/finalized` when a staged openpilot update is about to be installed; when openpilot is running it keeps the onroad check. `COMMAVIEWD_SKIP_OPENPILOT_UI_RESTART=1` skips the UI reload bookkeeping. `COMMAVIEWD_PARAMS_DIR`, `COMMAVIEWD_PROC_ROOT`, `COMMAVIEWD_STAGING_ROOT` override `/data/params/d`, `/proc`, `/data/safe_staging` (tests). |
 | `comma/scripts/revert_onroad_ui_export_patch.sh` | `bash /data/commaview/scripts/revert_onroad_ui_export_patch.sh [--force-offroad] [--preflight-only]` | Restores the upstream files (used by `uninstall.sh`). Refuses while driving (exit 42; `--force-offroad` changes nothing). `--preflight-only` checks without changing anything. |
 
 Why the scripts never restart openpilot's UI: openpilot cannot reload its UI in place.
@@ -234,7 +234,7 @@ Test on your machine while you work (`scripts/ci-local.sh`); CI is the last chec
 
 | Script | Usage | Flags/env |
 | --- | --- | --- |
-| `scripts/ci-local.sh` | `scripts/ci-local.sh [--all \| --list \| <target>...]` | Runs `commaviewd-ci`'s checks locally for the given CI targets (default `sunnypilot-release-pin`, the source releases build from): checks out the upstream source like CI (kept under `CI_LOCAL_SRC_DIR`, default `~/.cache/commaviewd-ci-src`), checks the UI export patch applies, then runs `run-verification.sh` and the telemetry guard. Needs the toolchain above. |
+| `scripts/ci-local.sh` | `scripts/ci-local.sh [--all \| --list \| <target>...]` | Runs `commaviewd-ci`'s checks locally for the given CI targets (default `sunnypilot-release-pin`, the source releases build from): checks out the upstream source like CI (`scripts/ci-local-checkout.sh`: kept under `CI_LOCAL_SRC_DIR`, default `~/.cache/commaviewd-ci-src`, as `<sha>` marked `<sha>.complete` and reused by the next run; downloads an interrupted run left behind are cleared), checks the UI export patch applies, then runs `run-verification.sh` and the telemetry guard. Needs the toolchain above. |
 | `commaviewd/scripts/run-verification.sh` | `OP_ROOT=/path/to/openpilot-src commaviewd/scripts/run-verification.sh` | Full verification pipeline: upstream interface guard, reproducible build, binary contract check, unit tests, release smoke bundle. Env: `OP_ROOT`, `DIST_DIR`, `RELEASE_SMOKE_TAG`. |
 | `commaviewd/scripts/upstream-interface-guard.sh` | `OP_ROOT=/path/to/openpilot-src commaviewd/scripts/upstream-interface-guard.sh [--telemetry-only] [--manifest <path>]` | Checks that upstream `cereal/services.py` and `log.capnp` have the services and fields the runtime needs (accepting renamed aliases), and that this repo's transformer, apply/verify scripts and exporter template exist. Apply/verify check applicability. Writes manifest to `DIST_DIR` by default. |
 | `commaviewd/scripts/reproducible-build.sh` | `OP_ROOT=/path/to/openpilot-src commaviewd/scripts/reproducible-build.sh [--manifest <path>]` | Builds twice with fixed `SOURCE_DATE_EPOCH` and compares host/aarch64 digests. |
@@ -258,8 +258,8 @@ scripts/sync-canary-upstream.sh <openpilot|sunnypilot> <ref> [dest-root]
 
 Supported refs:
 
-- `openpilot`: `nightly`, `nightly-dev`, `master`, `release-mici-staging`, `release-tizi-staging`, `release-chestnut-staging`
-- `sunnypilot`: `dev`, `master`, `staging`, `release-mici-staging`, `release-tizi-staging`, `staging-chestnut`
+- `openpilot`: `nightly`, `nightly-dev`, `nightly-chestnut`, `nightly-chestnut-dev`, `release-mici-staging`, `release-tizi-staging`, `release-chestnut-staging`
+- `sunnypilot`: `dev`, `dev-chestnut`, `release-mici-staging`, `release-tizi-staging`, `staging-chestnut`
 
 Default destination is `~/.cache/commaviewd-canary/<upstream>-<ref>/openpilot-src`. The script resolves the current ref SHA, force-checks out that SHA, initializes submodules, and writes `source.env` metadata.
 
@@ -336,20 +336,22 @@ commaviewd/scripts/run-verification.sh
 
 ## CI targets
 
-Main CI matrix (each target builds and runs the full verification pipeline unless noted):
+CI (`ci/targets.json`) checks every release channel and its staging branch, so drift between major releases shows up before it ships. Each upstream commit gets one full verification build; the other targets on that commit check that the UI export patch applies. The comma four (mici) and comma 3X (tizi) run the same release, so each branch is checked with both UI platforms where both use it.
 
-- `commaai/openpilot@release-mici` (`--platform mici`)
-- `commaai/openpilot@release-tizi` (`--platform tizi`)
-- `commaai/openpilot@release-chestnut` (`--platform mici` and `--platform tizi`; openpilot for devices with the chestnut external GPU)
-- `commaai/openpilot@release-tici` (`--platform tici`, backwards-compatible legacy hook-applicability check only)
-- `sunnypilot/sunnypilot@release-mici` (`--platform mici`)
-- `sunnypilot/sunnypilot@release-tizi` (`--platform tizi`)
-- `sunnypilot/openpilot@<COMMAVIEWD_RELEASE_SUNNYPILOT_REF>` (`--platform mici`): the pinned source the release workflow builds from, read from `ci/upstream-refs.env`
+- openpilot releases: `release-mici` (`--platform mici`), `release-tizi` (`--platform tizi`), `release-chestnut` (`--platform mici` and `--platform tizi`; openpilot for devices with the chestnut external GPU)
+- openpilot staging: `release-mici-staging` (`mici`), `release-tizi-staging` (`tizi`), `release-chestnut-staging` (`mici` and `tizi`)
+- sunnypilot releases: `release-mici` (`mici`), `release-tizi` (`tizi`)
+- sunnypilot staging: `release-mici-staging` (`mici`), `release-tizi-staging` (`tizi`), `staging-chestnut` (`mici` and `tizi`; sunnypilot has no chestnut release branch yet)
+- `sunnypilot-release-pin`: `sunnypilot/openpilot@<COMMAVIEWD_RELEASE_SUNNYPILOT_REF>` (`--platform mici`), the source the release workflow builds from, read from `ci/upstream-refs.env`. It is a commit from sunnypilot's `staging` branch, not a release branch, pinned on purpose for the video msgq header recovery (9e465ec); move it deliberately.
 
-Canaries (Mondays and Thursdays, 07:23/07:53 UTC):
+The comma 3 (tici) isn't checked: CommaView doesn't support it. Its openpilot (`release-tici`) is frozen upstream, and its screen is the Qt UI, not the Python UI the patch edits, so a patch check there would pass while proving nothing.
 
-- openpilot: `nightly`, `nightly-dev`, `master`, `release-mici-staging`, `release-tizi-staging`, `release-chestnut-staging` (`nightly`, `nightly-dev` and `master` run the applicability check and telemetry-only guard only)
-- sunnypilot: `dev`, `master`, `staging`, `release-mici-staging`, `release-tizi-staging`, `staging-chestnut` (sunnypilot has no chestnut release branch yet)
+Canaries (Mondays and Thursdays, 07:23/07:53 UTC) watch the bleeding edge, ahead of staging:
+
+- openpilot (`ci/canary-openpilot.json`): `nightly`, `nightly-dev`, `nightly-chestnut`, `nightly-chestnut-dev`, each with `--platform mici` and `--platform tizi`; interface guard and patch applicability only (no verification build)
+- sunnypilot (`ci/canary-sunnypilot.json`): `dev` and `dev-chestnut`, each with `--platform mici` and `--platform tizi`, with the verification build
+
+A canary failing is information: upstream changed an interface commaviewd uses.
 
 ## Program plans and telemetry references
 

@@ -21,7 +21,7 @@ while [ "$#" -gt 0 ]; do
     --json) shift ;;  # accepted for callers; output is always JSON
     --platform) REQUESTED_UI_PLATFORM="${2:-}"; shift 2 ;;
     --platform=*) REQUESTED_UI_PLATFORM="${1#--platform=}"; shift ;;
-    -h|--help) echo "Usage: verify_onroad_ui_export_patch.sh [--json] [--platform auto|mici|tizi|tici]"; exit 0 ;;
+    -h|--help) echo "Usage: verify_onroad_ui_export_patch.sh [--json] [--platform auto|mici|tizi]"; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -150,13 +150,24 @@ normalize_ui_platform() {
   case "$1" in
     auto) printf '%s\n' auto ;;
     mici) printf '%s\n' mici ;;
-    tizi|tici) printf '%s\n' tizi ;;
+    tizi) printf '%s\n' tizi ;;
+    # Not supported, and named so the caller can say so (see unsupported_device_message).
+    tici) printf '%s\n' tici ;;
     *) return 1 ;;
   esac
 }
 
+# The comma 3 (tici) runs openpilot's frozen release-tici, whose screen is the native Qt UI: the
+# Python UI the transformer edits isn't running there, so a patch would only look like it worked.
+UNSUPPORTED_DEVICE_EXIT=43
+unsupported_device_message() {
+  echo "CommaView doesn't support the comma 3 (tici): its openpilot release (release-tici) is frozen upstream and draws its screen differently. comma 3X and comma four are supported."
+}
+
+# Which comma this is, as openpilot reads it (HARDWARE.get_device_type()): "comma tici", "comma
+# tizi" or "comma mici".
 read_device_model() {
-  local model_path="/sys/firmware/devicetree/base/model"
+  local model_path="${COMMAVIEWD_DEVICE_MODEL_FILE:-/sys/firmware/devicetree/base/model}"
   [ -f "$model_path" ] || return 1
   tr -d '\000\r\n' < "$model_path" | sed 's/^comma //'
 }
@@ -173,7 +184,8 @@ detect_ui_platform() {
   device_model="$(read_device_model || true)"
   case "$device_model" in
     *mici*|*MICI*|*comma\ 4*) printf '%s\n' mici; return 0 ;;
-    *tizi*|*TIZI*|*tici*|*TICI*|*comma\ 3*) printf '%s\n' tizi; return 0 ;;
+    *tizi*|*TIZI*) printf '%s\n' tizi; return 0 ;;
+    *tici*|*TICI*) printf '%s\n' tici; return 0 ;;
   esac
   state_platform="$(state_value ONROAD_UI_EXPORT_UI_PLATFORM || true)"
   state_op_root="$(state_value ONROAD_UI_EXPORT_OP_ROOT || true)"
@@ -389,7 +401,10 @@ if git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   upstream_branch_value="$(upstream_branch)"
 fi
 
-if ! git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if [ "$ui_platform" = "tici" ]; then
+  # Read-only like every check here: report it so the app can say so, and exit with its own status.
+  state="unsupported-device"; reason="$(unsupported_device_message)"; repair_needed=false
+elif ! git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   state="missing-repo"; reason="upstream repo not found at $OP_ROOT"
 elif [ -z "$ui_platform" ]; then
   state="unknown-platform"; reason="unable to determine UI platform for $OP_ROOT; pass --platform mici or --platform tizi"
@@ -793,4 +808,5 @@ if [ -n "$fingerprint" ] && $patch_verified; then
 fi
 printf '%s\n' "$json"
 if $patch_verified; then exit 0; fi
+if [ "$state" = "unsupported-device" ]; then exit "$UNSUPPORTED_DEVICE_EXIT"; fi
 exit 1

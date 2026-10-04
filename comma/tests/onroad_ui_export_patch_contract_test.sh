@@ -111,7 +111,7 @@ legacy_markers=(
 [[ -f "$APPLY_SCRIPT" ]] || fail "missing apply script $APPLY_SCRIPT"
 [[ -f "$VERIFY_SCRIPT" ]] || fail "missing verify script $VERIFY_SCRIPT"
 grep -Fq 'python3 "$TRANSFORMER" --op-root "$OP_ROOT" --flavor "$flavor" --platform "$ui_platform"' "$APPLY_SCRIPT" || fail "apply script does not invoke transformer with selected platform"
-grep -Fq -- '--platform auto|mici|tizi|tici' "$APPLY_SCRIPT" || fail "apply script help missing platform selector"
+grep -Fq -- '--platform auto|mici|tizi]' "$APPLY_SCRIPT" || fail "apply script help missing platform selector"
 grep -Fq 'ONROAD_UI_EXPORT_UI_PLATFORM=%s' "$APPLY_SCRIPT" || fail "apply script does not persist UI platform"
 grep -Fq 'ONROAD_UI_EXPORT_METHOD=transformer' "$APPLY_SCRIPT" || fail "apply script does not persist transformer method"
 grep -Fq '"method": os.environ.get("METHOD", "")' "$VERIFY_SCRIPT" || fail "verify status missing method field wiring"
@@ -185,7 +185,13 @@ grep -Fq 'active_camera="wideRoad" if self.stream_type == WIDE_CAM else "road"' 
 grep -Fq 'active_camera="wideRoad" if is_wide_camera else "road"' "$TRANSFORMER" || fail "transformer missing wide onroad projection camera mapping"
 grep -Fq 'cloudlog.exception("commaview ui export publish failed")' "$TRANSFORMER" || fail "transformer missing publish guardrail"
 grep -Fq 'parser.add_argument("--platform", default="auto", choices=PLATFORM_CHOICES)' "$TRANSFORMER" || fail "transformer missing platform argument"
-grep -Fq 'NORMALIZED_PLATFORMS = {"mici": "mici", "tizi": "tizi", "tici": "tizi"}' "$TRANSFORMER" || fail "transformer missing tici alias normalization"
+# The comma 3 (tici) is refused by name (exit 43), never folded into the comma 3X (tizi).
+! grep -Fq 'NORMALIZED_PLATFORMS' "$TRANSFORMER" || fail "transformer must not alias tici to tizi"
+grep -Fq 'UNSUPPORTED_DEVICE_EXIT = 43' "$TRANSFORMER" || fail "transformer should refuse tici with exit 43"
+for script in "$APPLY_SCRIPT" "$VERIFY_SCRIPT"; do
+  grep -Fq 'UNSUPPORTED_DEVICE_EXIT=43' "$script" || fail "$script should refuse tici with exit 43"
+  ! grep -Fq 'tizi|tici)' "$script" || fail "$script must not fold tici into tizi"
+done
 
 # openpilot cannot reload its UI in place: manager never restarts a UI that exits,
 # and sunnypilot's restart_if_crash restarts it from modules manager preimported.

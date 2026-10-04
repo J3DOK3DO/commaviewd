@@ -15,9 +15,9 @@ Defaults:
 - dest-root: ~/.cache/commaviewd-canary/<upstream>-<ref>
 - checkout path: <dest-root>/openpilot-src
 
-Supported refs mirror current canary workflows:
-- openpilot: nightly, nightly-dev, master, release-mici-staging, release-tizi-staging, release-chestnut-staging
-- sunnypilot: dev, master, staging, release-mici-staging, release-tizi-staging, staging-chestnut
+Supported refs: the canaries' (ci/canary-*.json) and CI's staging refs (ci/targets.json):
+- openpilot: nightly, nightly-dev, nightly-chestnut, nightly-chestnut-dev, release-mici-staging, release-tizi-staging, release-chestnut-staging
+- sunnypilot: dev, dev-chestnut, release-mici-staging, release-tizi-staging, staging-chestnut
 USAGE
 }
 
@@ -36,15 +36,15 @@ case "$upstream" in
   openpilot)
     repo="https://github.com/commaai/openpilot.git"
     case "$ref" in
-      nightly|nightly-dev|master|release-mici-staging|release-tizi-staging|release-chestnut-staging) ;;
-      *) echo "ERROR: unsupported openpilot ref '$ref' (expected nightly, nightly-dev, master, release-mici-staging, release-tizi-staging, or release-chestnut-staging)" >&2; exit 2 ;;
+      nightly|nightly-dev|nightly-chestnut|nightly-chestnut-dev|release-mici-staging|release-tizi-staging|release-chestnut-staging) ;;
+      *) echo "ERROR: unsupported openpilot ref '$ref' (expected nightly, nightly-dev, nightly-chestnut, nightly-chestnut-dev, release-mici-staging, release-tizi-staging, or release-chestnut-staging)" >&2; exit 2 ;;
     esac
     ;;
   sunnypilot)
     repo="https://github.com/sunnypilot/sunnypilot.git"
     case "$ref" in
-      dev|master|staging|release-mici-staging|release-tizi-staging|staging-chestnut) ;;
-      *) echo "ERROR: unsupported sunnypilot ref '$ref' (expected dev, master, staging, release-mici-staging, release-tizi-staging, or staging-chestnut)" >&2; exit 2 ;;
+      dev|dev-chestnut|release-mici-staging|release-tizi-staging|staging-chestnut) ;;
+      *) echo "ERROR: unsupported sunnypilot ref '$ref' (expected dev, dev-chestnut, release-mici-staging, release-tizi-staging, or staging-chestnut)" >&2; exit 2 ;;
     esac
     ;;
   *)

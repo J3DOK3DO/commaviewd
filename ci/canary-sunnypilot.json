@@ -1,8 +1,6 @@
 [
-  {"name": "dev", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "dev", "ui_platform": "tizi"},
-  {"name": "master", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "master", "ui_platform": "mici"},
-  {"name": "staging", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "staging", "ui_platform": "tizi"},
-  {"name": "release-mici-staging", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "release-mici-staging", "ui_platform": "mici"},
-  {"name": "release-tizi-staging", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "release-tizi-staging", "ui_platform": "tizi"},
-  {"name": "staging-chestnut", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "staging-chestnut", "ui_platform": "mici"}
+  {"name": "dev-mici", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "dev", "ui_platform": "mici"},
+  {"name": "dev-tizi", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "dev", "ui_platform": "tizi"},
+  {"name": "dev-chestnut-mici", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "dev-chestnut", "ui_platform": "mici"},
+  {"name": "dev-chestnut-tizi", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "dev-chestnut", "ui_platform": "tizi"}
 ]

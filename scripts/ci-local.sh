@@ -65,37 +65,6 @@ if grep -q "	true	" <<<"$targets"; then
   export ARM_CAPNP_SO ARM_KJ_SO
 fi
 
-# The same tree CI checks out, blobless, sparse without the driving models, submodules included.
-# Prints where it is.
-checkout_source() {
-  local repo=$1 sha=$2 dir=$3
-  if [[ -f "$dir/.ci-local-complete" ]]; then
-    git -C "$dir" reset --hard -q HEAD
-    git -C "$dir" clean -fdq
-    echo "$dir"
-    return 0
-  fi
-  # Check out beside it and move it in once complete, so an interrupted run leaves no half tree
-  # where the next run would take it for a finished one.
-  local partial
-  mkdir -p "$(dirname "$dir")"
-  partial="$(mktemp -d "$dir.partial-XXXXXX")"
-  git -C "$partial" init -q
-  git -C "$partial" remote add origin "https://github.com/${repo}.git"
-  git -C "$partial" sparse-checkout set --no-cone '/*' '!/selfdrive/modeld/models/' '!/openpilot/selfdrive/modeld/models/'
-  git -C "$partial" fetch -q --depth 1 --filter=blob:none origin "$sha"
-  git -C "$partial" checkout -q FETCH_HEAD
-  git -C "$partial" submodule update -q --init --recursive --depth 1
-  touch "$partial/.ci-local-complete"
-  if [[ -e "$dir" ]]; then
-    echo "$dir exists but isn't a complete checkout: using $partial (remove $dir to tidy up)" >&2
-    dir="$partial"
-  else
-    mv "$partial" "$dir"
-  fi
-  echo "$dir"
-}
-
 failed=()
 while IFS=$'\t' read -r name repo platform sha run_verification why; do
   step "$name ($repo $sha, $platform)"
@@ -104,7 +73,8 @@ while IFS=$'\t' read -r name repo platform sha run_verification why; do
   set +e
   (
     set -euo pipefail
-    op_root="$(checkout_source "$repo" "$sha" "$SRC_DIR/${repo//\//-}/$sha")"
+    # The same tree CI checks out, cached under $SRC_DIR for the next run.
+    op_root="$(scripts/ci-local-checkout.sh "https://github.com/${repo}.git" "$sha" "$SRC_DIR/${repo//\//-}/$sha")"
     mkdir -p dist
     OP_ROOT="$op_root" ./commaviewd/scripts/upstream-interface-guard.sh --telemetry-only
     COMMAVIEWD_INSTALL_DIR="$REPO_ROOT/comma" COMMAVIEWD_OP_ROOT="$op_root" ./comma/scripts/apply_onroad_ui_export_patch.sh --platform "$platform"
