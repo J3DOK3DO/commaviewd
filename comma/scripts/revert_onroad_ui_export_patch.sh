@@ -11,9 +11,27 @@ PARAMS_DIR="${COMMAVIEWD_PARAMS_DIR:-/data/params/d}"
 PREFLIGHT_ONLY=0
 UI_PREFIX=""
 
-# Only the reset/checkout below may write .git/index; status-style reads must
-# not, or launch_chffrplus.sh skips a staged openpilot update.
+# No git command here may rewrite .git/index: launch_chffrplus.sh skips a staged
+# openpilot update when anything under .git is newer than .overlay_init. Reads run
+# without optional locks, and files are restored from HEAD with git cat-file, never
+# git checkout or git reset.
 export GIT_OPTIONAL_LOCKS=0
+
+MAINT_LOCK="${COMMAVIEWD_MAINT_LOCK:-${COMMAVIEWD_DEFERRED_DIR:-/data/commaview-deferred}/maint.lock}"
+
+# One CommaView maintenance at a time: install, uninstall, this patch and its revert
+# and the deferred queue's job all rewrite the same files. A caller holding the lock
+# (install.sh, the deferred job) says so in the environment. Without flock, or where
+# the lock file can't be made, it runs unlocked as before.
+take_maint_lock() {
+  [ "${COMMAVIEWD_MAINT_LOCK_HELD:-0}" = "1" ] && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$MAINT_LOCK")" 2>/dev/null || return 0
+  { exec {MAINT_LOCK_FD}>>"$MAINT_LOCK"; } 2>/dev/null || return 0
+  flock -w "$1" "$MAINT_LOCK_FD" || return 1
+  export COMMAVIEWD_MAINT_LOCK_HELD=1 COMMAVIEWD_MAINT_LOCK_FD="$MAINT_LOCK_FD"
+}
+
 
 read_param() {
   local path="$PARAMS_DIR/$1"
@@ -24,11 +42,19 @@ read_param() {
 # openpilot and sunnypilot publish IsOffroad; upstream no longer has an IsOnroad
 # param, so reading only IsOnroad always looked offroad - even while driving.
 # IsOnroad stays a fallback for older builds and bench rigs. Prints 1 when onroad.
+# Anything uncertain is onroad: only a machine without openpilot's params at all (a
+# bench or CI checkout) reads offroad when neither param says.
 read_is_onroad() {
   case "$(read_param IsOffroad)" in
     0) echo 1 ;;
     1) echo 0 ;;
-    *) if [ "$(read_param IsOnroad)" = "1" ]; then echo 1; else echo 0; fi ;;
+    *)
+      case "$(read_param IsOnroad)" in
+        1) echo 1 ;;
+        0) echo 0 ;;
+        *) if [ -d "$PARAMS_DIR" ]; then echo 1; else echo 0; fi ;;
+      esac
+      ;;
   esac
 }
 
@@ -75,6 +101,12 @@ ensure_offroad_ready
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   exit 0
 fi
+if ! take_maint_lock 30; then
+  echo "ERROR: another CommaView install, uninstall or repair is running; try again when it has finished" >&2
+  exit 1
+fi
+# The car may have been driven off while this waited for the lock.
+ensure_offroad_ready
 
 
 detect_ui_prefix() {
@@ -133,7 +165,7 @@ restore_managed_targets_from_backup() {
         restore_ec=1
         continue
       fi
-      if ! cp -a "$backup_root/$rel" "$OP_ROOT/$rel"; then
+      if ! atomic_copy "$backup_root/$rel" "$OP_ROOT/$rel"; then
         echo "WARN: failed to restore managed revert rollback target from backup: $rel" >&2
         restore_ec=1
       fi
@@ -147,26 +179,67 @@ restore_managed_targets_from_backup() {
   return "$restore_ec"
 }
 
+# Replaces dst with src's content all at once: a temp file beside it, synced, then
+# renamed over it, so a kill or power loss leaves openpilot the old file or the new
+# one, never a truncated one.
+atomic_copy() {
+  local src="$1" dst="$2" tmp
+  tmp="$(dirname "$dst")/.$(basename "$dst").commaview-tmp.$$"
+  if ! cp -p "$src" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  sync "$tmp" 2>/dev/null || sync
+  mv -f "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
+}
+
+# Puts a managed target back the way openpilot's HEAD has it (removes it when HEAD
+# has none). The original is read with git cat-file and only a file that differs is
+# replaced, atomically: git checkout and git reset would rewrite .git/index.
+restore_target_from_head() {
+  local rel="$1"
+  local dst="$OP_ROOT/$rel"
+  local tmp
+  if ! git -C "$OP_ROOT" cat-file -e "HEAD:./$rel" 2>/dev/null; then
+    if ! rm -f "$dst"; then
+      echo "WARN: failed to remove untracked managed target: $rel" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if ! mkdir -p "$(dirname "$dst")"; then
+    echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
+    return 1
+  fi
+  tmp="$(dirname "$dst")/.$(basename "$dst").commaview-head.$$"
+  if ! git -C "$OP_ROOT" cat-file -p "HEAD:./$rel" > "$tmp"; then
+    rm -f "$tmp"
+    echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
+    return 1
+  fi
+  if [ -f "$dst" ] && cmp -s "$tmp" "$dst"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if [ -f "$dst" ]; then
+    chmod --reference="$dst" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+  else
+    chmod 644 "$tmp"
+  fi
+  sync "$tmp" 2>/dev/null || sync
+  if ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp"
+    echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
+    return 1
+  fi
+}
+
 reset_managed_targets() {
   local rel=""
   local reset_ec=0
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
-    if ! git -C "$OP_ROOT" reset -q HEAD -- "$rel" >/dev/null 2>&1; then
-      echo "WARN: failed to reset managed target index: $rel" >&2
-      reset_ec=1
-    fi
-    if git -C "$OP_ROOT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
-      if ! git -C "$OP_ROOT" checkout -- "$rel"; then
-        echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
-        reset_ec=1
-      fi
-    else
-      if ! rm -f "$OP_ROOT/$rel"; then
-        echo "WARN: failed to remove untracked managed target: $rel" >&2
-        reset_ec=1
-      fi
-    fi
+    restore_target_from_head "$rel" || reset_ec=1
   done < <(managed_targets)
   return "$reset_ec"
 }

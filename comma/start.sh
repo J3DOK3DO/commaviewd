@@ -82,19 +82,44 @@ if [ $? -ne 0 ]; then
   echo "WARN: invalid runtime debug config JSON; bridge/control will fall back to safe defaults" >> "$LOG_DIR/commaviewd-control.log"
 fi
 
+START_PARAMS_DIR="${COMMAVIEWD_PARAMS_DIR:-/data/params/d}"
+
 read_start_param() {
-  cat "/data/params/d/$1" 2>/dev/null | tr -d "\000\r\n"
+  cat "$START_PARAMS_DIR/$1" 2>/dev/null | tr -d "\000\r\n"
 }
 
 # openpilot and sunnypilot publish IsOffroad; upstream no longer has an IsOnroad
 # param, so reading only IsOnroad always looked offroad - even while driving -
 # and let startup repair rewrite openpilot's UI files and kill its UI mid-drive.
+# Anything uncertain is onroad, so startup repair waits. (The boot hook's
+# --before-openpilot step doesn't ask: openpilot hasn't started, so nothing drives.)
 read_is_onroad() {
   case "$(read_start_param IsOffroad)" in
     0) echo 1 ;;
     1) echo 0 ;;
-    *) if [ "$(read_start_param IsOnroad)" = "1" ]; then echo 1; else echo 0; fi ;;
+    *)
+      case "$(read_start_param IsOnroad)" in
+        1) echo 1 ;;
+        0) echo 0 ;;
+        *) if [ -d "$START_PARAMS_DIR" ]; then echo 1; else echo 0; fi ;;
+      esac
+      ;;
   esac
+}
+
+# What runs on in the background (the supervisors, the log rotation loop, the deferred queue's
+# waiter) keeps none of the descriptors start.sh was handed: an install's maintenance lock would
+# stay held for as long as the runtime runs, a parent's sockets would stay open.
+release_inherited_fds() {
+  local fd
+  unset COMMAVIEWD_MAINT_LOCK_HELD COMMAVIEWD_MAINT_LOCK_FD
+  for fd in /proc/"$BASHPID"/fd/*; do
+    fd="${fd##*/}"
+    case "$fd" in
+      0|1|2|255|*[!0-9]*) continue ;;
+    esac
+    eval "exec $fd>&-" 2>/dev/null
+  done
 }
 
 # CommaView never signals openpilot's UI: a signalled UI stays dead on openpilot
@@ -218,6 +243,7 @@ rotate_runtime_logs() {
 
 start_runtime_log_rotation_loop() {
   (
+    release_inherited_fds
     while true; do
       sleep "$COMMAVIEWD_LOG_ROTATE_INTERVAL_SEC"
       rotate_runtime_logs
@@ -267,6 +293,7 @@ start_runtime_process() {
   mode="$5"
   shift 5
   (
+    release_inherited_fds
     crashes=0
     backoff="$COMMAVIEWD_SUPERVISOR_FIRST_BACKOFF_SEC"
     while :; do
@@ -344,7 +371,7 @@ start_runtime_log_rotation_loop
 # An install, uninstall or repair asked for while onroad waits in run_when_offroad.sh's queue until
 # openpilot is offroad. A reboot ends its waiter; start it again.
 if [ -f "$DEFERRED_DIR/runner.sh" ]; then
-  COMMAVIEWD_DEFERRED_DIR="$DEFERRED_DIR" bash "$DEFERRED_DIR/runner.sh" resume >/dev/null 2>&1 || true
+  ( release_inherited_fds; COMMAVIEWD_DEFERRED_DIR="$DEFERRED_DIR" bash "$DEFERRED_DIR/runner.sh" resume >/dev/null 2>&1 ) || true
 fi
 
 echo "CommaView runtime started (bridge+control)"

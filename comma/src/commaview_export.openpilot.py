@@ -11,8 +11,9 @@ from collections import deque
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
 
 COMMAVIEW_VENDOR_DIR = os.environ.get("COMMAVIEWD_PYTHON_VENDOR_DIR", "/data/commaview/vendor")
+# Appended, not prepended: this runs in openpilot's UI process, and openpilot's own packages win.
 if os.path.isdir(COMMAVIEW_VENDOR_DIR) and COMMAVIEW_VENDOR_DIR not in sys.path:
-  sys.path.insert(0, COMMAVIEW_VENDOR_DIR)
+  sys.path.append(COMMAVIEW_VENDOR_DIR)
 
 try:
   import orjson as _orjson

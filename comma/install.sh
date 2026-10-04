@@ -120,11 +120,26 @@ DEFERRED_DIR="${COMMAVIEWD_DEFERRED_DIR:-/data/commaview-deferred}"
 tmpdir=""
 COMPANION_DIR=""  # set to "$tmpdir/companions" by refresh_required_files
 BACKUP_ROOT="${COMMAVIEWD_BACKUP_ROOT:-/data/commaview-backups}"
-INSTALL_ROLLBACK_BACKUP_ROOT="${COMMAVIEWD_INSTALL_ROLLBACK_BACKUP_ROOT:-$BACKUP_ROOT/install-rollback}"
+# The files an install replaces are backed up here on /data (not /tmp, which a power loss empties),
+# the newest INSTALL_BACKUP_KEEP kept, so a failed install can always be put back.
+INSTALL_BACKUP_ROOT="${COMMAVIEWD_INSTALL_BACKUP_ROOT:-$BACKUP_ROOT/install-previous}"
+INSTALL_BACKUP_KEEP="${COMMAVIEWD_INSTALL_BACKUP_KEEP:-3}"
+INSTALL_BACKUP_DIR=""
 INSTALL_MUTATED=0
 INSTALL_SUCCESS=0
+INSTALL_ROLLED_BACK=0
 PRESERVE_TMPDIR=0
 ONROAD_UI_EXPORT_APPLIED=0
+MAINT_LOCK="${COMMAVIEWD_MAINT_LOCK:-$DEFERRED_DIR/maint.lock}"
+# How long a direct install waits for a deferred job, repair or uninstall that is running.
+MAINT_LOCK_WAIT_SEC="${COMMAVIEWD_MAINT_LOCK_WAIT_SEC:-120}"
+# A queued install reports its stage to the app beside the queue's status.json.
+PROGRESS_FILE=""
+if [ "${COMMAVIEWD_DEFERRED_JOB:-0}" = "1" ]; then
+  PROGRESS_FILE="$DEFERRED_DIR/progress.json"
+fi
+LAST_ERROR=""
+LAST_FAILED_COMMAND=""
 
 usage() {
   cat <<USAGE
@@ -177,9 +192,75 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+error() {
+  LAST_ERROR="$*"
+  echo "ERROR: $*" >&2
+}
+
+now_ms() {
+  local ms
+  ms="$(date +%s%3N 2>/dev/null)"
+  case "$ms" in ''|*[!0-9]*) ms="$(date +%s)000" ;; esac
+  printf '%s\n' "$ms"
+}
+
+# Where the install is: a "COMMAVIEW_STAGE <name> [detail]" line on stdout (an SSH session reads
+# them live) and, for a queued install, progress.json ({"stage","detail","atMs"}) written whole
+# beside the deferred queue's status.json, which commaviewd reports to the app. Stages in order:
+# starting, downloading, verifying, installing, restarting, done; or rolled_back / failed with the
+# last error as the detail. Never fails the install.
+stage() {
+  local name="$1" detail="${2:-}" tmp
+  detail="$(printf '%s' "$detail" | tr -d '\000-\037"\\' | cut -c1-300)"
+  echo "COMMAVIEW_STAGE $name${detail:+ $detail}"
+  [ -n "$PROGRESS_FILE" ] || return 0
+  mkdir -p "$(dirname "$PROGRESS_FILE")" 2>/dev/null || return 0
+  tmp="$PROGRESS_FILE.tmp.$$"
+  if printf '{"stage":"%s","detail":"%s","atMs":%s}\n' "$name" "$detail" "$(now_ms)" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$PROGRESS_FILE" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+  return 0
+}
+
+# One CommaView maintenance at a time: install, uninstall, the onroad UI export patch and its revert
+# and the deferred queue's job all rewrite the same files. The deferred job already holds the lock
+# and says so in the environment; the patch scripts this runs see the same. Without flock, or where
+# the lock file can't be made, it runs unlocked as before.
+take_maint_lock() {
+  [ "${COMMAVIEWD_MAINT_LOCK_HELD:-0}" = "1" ] && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$MAINT_LOCK")" 2>/dev/null || return 0
+  { exec {MAINT_LOCK_FD}>>"$MAINT_LOCK"; } 2>/dev/null || return 0
+  flock -w "$1" "$MAINT_LOCK_FD" || return 1
+  export COMMAVIEWD_MAINT_LOCK_HELD=1 COMMAVIEWD_MAINT_LOCK_FD="$MAINT_LOCK_FD"
+}
+
+# Starts the runtime without this install's lock descriptor (this process keeps holding the lock):
+# a runtime that inherited it would hold the lock for as long as it runs. start.sh still sees the
+# lock is held, so its own repair step doesn't wait for this install.
+without_maint_lock_fd() {
+  local fd="${COMMAVIEWD_MAINT_LOCK_FD:-}"
+  case "$fd" in
+    ''|*[!0-9]*) "$@" ;;
+    *) "$@" {fd}>&- ;;
+  esac
+}
+
+# The heavy steps (download, checksum, unpack, copies) run at the lowest CPU and I/O priority, so
+# they never compete with openpilot.
+low_priority() {
+  if command -v ionice >/dev/null 2>&1; then
+    nice -n 19 ionice -t -c3 "$@"
+  else
+    nice -n 19 "$@"
+  fi
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "ERROR: missing required command: $1" >&2
+    error "missing required command: $1"
     exit 1
   }
 }
@@ -193,11 +274,19 @@ read_param() {
 # openpilot and sunnypilot publish IsOffroad; upstream no longer has an IsOnroad
 # param, so reading only IsOnroad always looked offroad - even while driving.
 # IsOnroad stays a fallback for older builds and bench rigs. Prints 1 when onroad.
+# Anything uncertain is onroad: only a machine without openpilot's params at all (a
+# bench or CI checkout) reads offroad when neither param says.
 read_is_onroad() {
   case "$(read_param IsOffroad)" in
     0) echo 1 ;;
     1) echo 0 ;;
-    *) if [ "$(read_param IsOnroad)" = "1" ]; then echo 1; else echo 0; fi ;;
+    *)
+      case "$(read_param IsOnroad)" in
+        1) echo 1 ;;
+        0) echo 0 ;;
+        *) if [ -d "$PARAMS_DIR" ]; then echo 1; else echo 0; fi ;;
+      esac
+      ;;
   esac
 }
 
@@ -269,39 +358,30 @@ stop_commaview_processes() {
 
 ensure_commaview_stopped() {
   if ! stop_commaview_processes; then
-    echo "ERROR: failed to stop existing CommaView runtime processes: $(commaview_pids | tr '\n' ' ')" >&2
+    error "failed to stop existing CommaView runtime processes: $(commaview_pids | tr '\n' ' ')"
     exit 1
   fi
   leftover="$(commaview_pids | tr '\n' ' ')"
   if [ -n "$leftover" ]; then
-    echo "ERROR: CommaView runtime processes still running after stop: $leftover" >&2
+    error "CommaView runtime processes still running after stop: $leftover"
     exit 1
   fi
   rm -f "$INSTALL_DIR/run/bridge.pid" "$INSTALL_DIR/run/control.pid"
 }
 
 
-preserve_install_rollback_backup() {
-  local backup_dir="$1"
-  local preserved_dir=""
-  mkdir -p "$INSTALL_ROLLBACK_BACKUP_ROOT" || return $?
-  preserved_dir="$(mktemp -d "$INSTALL_ROLLBACK_BACKUP_ROOT/$(date -u +%Y%m%d-%H%M%S).XXXXXX")" || return $?
-  cp -a "$backup_dir"/. "$preserved_dir"/ || return $?
-  printf '%s\n' "$preserved_dir" || return $?
-}
-
 restore_previous_install_tree() {
-  local backup_dir="$tmpdir/previous-install"
+  local backup_dir="$INSTALL_BACKUP_DIR"
   local restore_ec=0
-  local preserved_dir=""
   [ "$INSTALL_MUTATED" = "1" ] || return 0
   [ "$INSTALL_SUCCESS" = "0" ] || return 0
-  [ -d "$backup_dir" ] || return 0
+  [ -n "$backup_dir" ] && [ -d "$backup_dir" ] || return 0
 
   echo "WARN: install failed after modifying live tree; restoring previous CommaView files" >&2
   rm -f \
     "$INSTALL_DIR/commaviewd" \
     "$INSTALL_DIR/VERSION" \
+    "$INSTALL_DIR/install.sh" \
     "$INSTALL_DIR/start.sh" \
     "$INSTALL_DIR/stop.sh" \
     "$INSTALL_DIR/uninstall.sh" \
@@ -311,23 +391,20 @@ restore_previous_install_tree() {
     "$INSTALL_DIR/lib" \
     "$INSTALL_DIR/scripts" \
     "$INSTALL_DIR/patches" \
+    "$INSTALL_DIR/vendor" \
     "$INSTALL_DIR/src"
   if cp -a "$backup_dir"/. "$INSTALL_DIR"/; then
     :
   else
     restore_ec=$?
-    echo "ERROR: failed to restore previous CommaView install tree from $backup_dir" >&2
-    if preserved_dir="$(preserve_install_rollback_backup "$backup_dir")"; then
-      echo "ERROR: preserved failed install rollback backup at $preserved_dir" >&2
-    else
-      PRESERVE_TMPDIR=1
-      echo "ERROR: failed to preserve rollback backup under $INSTALL_ROLLBACK_BACKUP_ROOT; keeping temporary backup at $backup_dir" >&2
-    fi
+    echo "ERROR: failed to restore previous CommaView install tree from $backup_dir; the backup stays there for recovery" >&2
     return "$restore_ec"
   fi
+  sync
+  INSTALL_ROLLED_BACK=1
   if [ -x "$INSTALL_DIR/start.sh" ]; then
     echo "WARN: restarting restored CommaView runtime after failed install" >&2
-    COMMAVIEWD_RESTART_REASON=install-rollback bash "$INSTALL_DIR/start.sh" >/dev/null 2>&1 || \
+    without_maint_lock_fd env COMMAVIEWD_RESTART_REASON=install-rollback bash "$INSTALL_DIR/start.sh" >/dev/null 2>&1 || \
       echo "WARN: failed to restart restored CommaView runtime" >&2
   fi
 }
@@ -360,12 +437,15 @@ revert_onroad_ui_export_after_failed_install() {
 }
 
 cleanup() {
+  local exit_status=$?
   local restore_ec=0
+  local revert_failed=0
   [ -n "${COMMAVIEWD_INSTALLER_HANDOFF_FILE:-}" ] && rm -f "$COMMAVIEWD_INSTALLER_HANDOFF_FILE"
   if revert_onroad_ui_export_after_failed_install; then
     restore_previous_install_tree || restore_ec=$?
   else
     restore_ec=$?
+    revert_failed=1
     echo "ERROR: skipping previous install restore because upstream UI transformer revert failed" >&2
   fi
   if [ "$PRESERVE_TMPDIR" = "1" ]; then
@@ -373,7 +453,32 @@ cleanup() {
   elif [ -n "${tmpdir:-}" ]; then
     rm -rf "$tmpdir"
   fi
+  # Exit 42 (the car is being driven) and 75 (queued) changed nothing: the queue waits again.
+  if [ "${INSTALL_SUCCESS:-0}" != "1" ] && [ "$exit_status" -ne 0 ] && [ "$exit_status" -ne 42 ] && \
+     [ "$exit_status" -ne "${DEFERRED_EXIT:-75}" ]; then
+    local why="${LAST_ERROR:-${LAST_FAILED_COMMAND:-exit $exit_status}}"
+    if [ "$revert_failed" = "1" ]; then
+      stage failed "$why; openpilot UI files could not be reverted"
+    elif [ "$restore_ec" -ne 0 ]; then
+      stage failed "$why; the previous release could not be restored"
+    elif [ "${INSTALL_ROLLED_BACK:-0}" = "1" ]; then
+      stage rolled_back "$why"
+    else
+      stage failed "$why"
+    fi
+  fi
   return "$restore_ec"
+}
+
+# Prunes the install backups to the newest INSTALL_BACKUP_KEEP.
+prune_install_backups() {
+  local old
+  [ -d "$INSTALL_BACKUP_ROOT" ] || return 0
+  find "$INSTALL_BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -r | \
+    tail -n +"$((INSTALL_BACKUP_KEEP + 1))" | while IFS= read -r old; do
+      [ -n "$old" ] && rm -rf "${INSTALL_BACKUP_ROOT:?}/$old"
+    done
+  return 0
 }
 
 
@@ -397,8 +502,8 @@ queue_install_until_offroad() {
 
 # The release being installed installs itself: an installer asked for another release (the comma's
 # own update queues the installed install.sh with --tag) hands over to that release's install.sh,
-# fetched with its companions, before it changes anything. Piped installs (curl | bash) already run
-# the release's own installer.
+# fetched on its own before the other companions (which that installer fetches itself), before it
+# changes anything. Piped installs (curl | bash) already run the release's own installer.
 handoff_to_release_installer() {
   [ "${COMMAVIEWD_INSTALLER_HANDOFF:-0}" = "1" ] && return 0
   local self="${BASH_SOURCE[0]:-}" next="$COMPANION_DIR/install.sh" copy
@@ -445,7 +550,7 @@ copy_required_file() {
   local src="$COMPANION_DIR/$src_rel"
 
   if [ ! -f "$src" ]; then
-    echo "ERROR: missing required installer file: $src_rel" >&2
+    error "missing required installer file: $src_rel"
     exit 1
   fi
 
@@ -471,33 +576,38 @@ required_files=(
   "src/commaview_drive_stats.py"
 )
 
+# Fetches the named companions (all of them by default) that aren't fetched yet: install.sh comes
+# first on its own, so an installer handing over to another release's fetches nothing else twice.
 refresh_required_files() {
   local rel dst url dir
   local failed=()
+  local wanted=("$@")
+  [ "${#wanted[@]}" -gt 0 ] || wanted=("${required_files[@]}")
 
   COMPANION_DIR="$tmpdir/companions"
   mkdir -p "$COMPANION_DIR"
 
-  for rel in "${required_files[@]}"; do
+  for rel in "${wanted[@]}"; do
     dst="$COMPANION_DIR/$rel"
     url="${INSTALLER_RAW_BASE}/$rel"
     dir="$(dirname "$dst")"
+    [ -f "$dst" ] && continue
 
     if ! mkdir -p "$dir"; then
-      echo "ERROR: unable to create directory for installer companion files: $dir" >&2
+      error "unable to create directory for installer companion files: $dir"
       failed+=("$rel")
       continue
     fi
 
     echo "Fetching installer companion: $rel"
-    if ! curl -fsSL --retry 3 --retry-delay 1 -o "$dst" "$url"; then
+    if ! low_priority curl -fsSL --retry 3 --retry-delay 1 -o "$dst" "$url"; then
       rm -f "$dst"
       failed+=("$rel")
     fi
   done
 
   if [ "${#failed[@]}" -gt 0 ]; then
-    echo "ERROR: failed to fetch required installer files from ${INSTALLER_RAW_BASE}:" >&2
+    error "failed to fetch required installer files from ${INSTALLER_RAW_BASE}:"
     for rel in "${failed[@]}"; do
       echo "  - $rel" >&2
     done
@@ -515,7 +625,7 @@ validate_required_files() {
   done
 
   if [ "${#missing[@]}" -gt 0 ]; then
-    echo "ERROR: missing required installer files:" >&2
+    error "missing required installer files:"
     for path in "${missing[@]}"; do
       echo "  - $path" >&2
     done
@@ -639,12 +749,17 @@ $BOOT_HOOK_CMD" "$CONTINUE_SH"
   echo "Boot hook installed"
 }
 
+# Everything clean_managed_install_tree removes or deploy replaces, so a failed install can put the
+# previous release back whole. Kept on /data and synced before anything is removed.
 backup_managed_install_tree() {
-  local backup_dir="$tmpdir/previous-install"
-  mkdir -p "$backup_dir"
+  local backup_dir
+  mkdir -p "$INSTALL_BACKUP_ROOT"
+  backup_dir="$(mktemp -d "$INSTALL_BACKUP_ROOT/$(date -u +%Y%m%d-%H%M%S).XXXXXX")"
+  INSTALL_BACKUP_DIR="$backup_dir"
   for rel in \
     commaviewd \
     VERSION \
+    install.sh \
     start.sh \
     stop.sh \
     uninstall.sh \
@@ -656,8 +771,9 @@ backup_managed_install_tree() {
     vendor \
     src; do
     [ -e "$INSTALL_DIR/$rel" ] || continue
-    cp -a "$INSTALL_DIR/$rel" "$backup_dir/$rel"
+    low_priority cp -a "$INSTALL_DIR/$rel" "$backup_dir/$rel"
   done
+  sync
 }
 
 clean_managed_install_tree() {
@@ -676,8 +792,10 @@ clean_managed_install_tree() {
     "$INSTALL_DIR/scripts" \
     "$INSTALL_DIR/patches" \
     "$INSTALL_DIR/vendor" \
-    "$INSTALL_DIR/src" \
-    "$INSTALL_DIR/run"
+    "$INSTALL_DIR/src"
+  # run/ keeps its state (the UI reload marker, the car identity cache); only what names the
+  # stopped runtime goes.
+  rm -f "$INSTALL_DIR"/run/*.pid "$INSTALL_DIR/run/ui-export.sock"
   mkdir -p \
     "$INSTALL_DIR/logs" \
     "$INSTALL_DIR/run" \
@@ -695,9 +813,14 @@ need_cmd cp
 
 tmpdir="$(mktemp -d /tmp/commaview-install.XXXXXX)"
 trap cleanup EXIT
+# What failed, for the stage report, when a command stops the install without an ERROR line.
+set -E
+trap 'LAST_FAILED_COMMAND="command failed (exit $?): $BASH_COMMAND"' ERR
+stage starting
+refresh_required_files install.sh
+handoff_to_release_installer
 refresh_required_files
 validate_required_files
-handoff_to_release_installer
 
 echo "=== CommaView ${VERSION} Installer ==="
 echo "Release: ${RELEASE_TAG}"
@@ -705,20 +828,27 @@ echo "Repo:    ${GITHUB_REPO}"
 
 ensure_offroad_ready
 
-mkdir -p "$INSTALL_DIR/logs" "$INSTALL_DIR/run" "$INSTALL_DIR/lib" "$INSTALL_DIR/api"
-
-echo "Downloading release assets..."
-curl -fL --retry 3 --retry-delay 1 -o "$tmpdir/$ASSET_NAME" "$BASE_URL/$ASSET_NAME"
-curl -fL --retry 3 --retry-delay 1 -o "$tmpdir/$ASSET_SHA_NAME" "$BASE_URL/$ASSET_SHA_NAME"
-
-expected_sha="$(awk 'NF{print $1; exit}' "$tmpdir/$ASSET_SHA_NAME" | tr -d '\r\n')"
-if ! echo "$expected_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then
-  echo "ERROR: invalid sha256 file format: $ASSET_SHA_NAME" >&2
+if ! take_maint_lock "$MAINT_LOCK_WAIT_SEC"; then
+  error "another CommaView install, uninstall or repair is running; try again when it has finished"
   exit 1
 fi
-actual_sha="$(sha256sum "$tmpdir/$ASSET_NAME" | awk '{print $1}')"
+
+mkdir -p "$INSTALL_DIR/logs" "$INSTALL_DIR/run" "$INSTALL_DIR/lib" "$INSTALL_DIR/api"
+
+stage downloading "$RELEASE_TAG"
+echo "Downloading release assets..."
+low_priority curl -fL --retry 3 --retry-delay 1 -o "$tmpdir/$ASSET_NAME" "$BASE_URL/$ASSET_NAME"
+low_priority curl -fL --retry 3 --retry-delay 1 -o "$tmpdir/$ASSET_SHA_NAME" "$BASE_URL/$ASSET_SHA_NAME"
+
+stage verifying "$RELEASE_TAG"
+expected_sha="$(awk 'NF{print $1; exit}' "$tmpdir/$ASSET_SHA_NAME" | tr -d '\r\n')"
+if ! echo "$expected_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+  error "invalid sha256 file format: $ASSET_SHA_NAME"
+  exit 1
+fi
+actual_sha="$(low_priority sha256sum "$tmpdir/$ASSET_NAME" | awk '{print $1}')"
 if [ "$expected_sha" != "$actual_sha" ]; then
-  echo "ERROR: checksum mismatch" >&2
+  error "checksum mismatch"
   echo "  expected: $expected_sha" >&2
   echo "  actual:   $actual_sha" >&2
   exit 1
@@ -727,18 +857,23 @@ fi
 STAGED_BUNDLE="$tmpdir/staged-bundle"
 mkdir -p "$STAGED_BUNDLE"
 echo "Staging and validating bundle..."
-tar -xzf "$tmpdir/$ASSET_NAME" -C "$STAGED_BUNDLE" --strip-components=1
+low_priority tar -xzf "$tmpdir/$ASSET_NAME" -C "$STAGED_BUNDLE" --strip-components=1
 if [ ! -f "$STAGED_BUNDLE/commaviewd" ]; then
-  echo "ERROR: bundle missing commaviewd" >&2
+  error "bundle missing commaviewd"
   exit 1
 fi
 staged_capnp_lib_count=$(find "$STAGED_BUNDLE/lib" -maxdepth 1 -type f -name 'libcapnp-*.so' 2>/dev/null | wc -l | tr -d ' ')
 staged_kj_lib_count=$(find "$STAGED_BUNDLE/lib" -maxdepth 1 -type f -name 'libkj-*.so' 2>/dev/null | wc -l | tr -d ' ')
 if [ "$staged_capnp_lib_count" -eq 0 ] || [ "$staged_kj_lib_count" -eq 0 ]; then
-  echo "ERROR: bundle missing required runtime libs" >&2
+  error "bundle missing required runtime libs"
   exit 1
 fi
 
+# The car may have been driven off while this downloaded: check again right before anything
+# changes. Nothing has changed yet, so a queued install just waits for the next parked stretch.
+ensure_offroad_ready
+
+stage installing "$RELEASE_TAG"
 backup_managed_install_tree
 
 echo "Stopping existing CommaView processes..."
@@ -747,27 +882,33 @@ ensure_commaview_stopped
 clean_managed_install_tree
 
 echo "Installing staged bundle..."
-cp -a "$STAGED_BUNDLE"/. "$INSTALL_DIR"/
+low_priority cp -a "$STAGED_BUNDLE"/. "$INSTALL_DIR"/
 
 deploy_required_scripts
 ensure_api_auth_token
 echo "Applying direct v2 onroad UI export patch lifecycle..."
 if [ -x "$INSTALL_DIR/scripts/apply_onroad_ui_export_patch.sh" ]; then
-  COMMAVIEWD_INSTALL_DIR="$INSTALL_DIR" bash "$INSTALL_DIR/scripts/apply_onroad_ui_export_patch.sh" --force-repair
+  apply_ec=0
+  COMMAVIEWD_INSTALL_DIR="$INSTALL_DIR" bash "$INSTALL_DIR/scripts/apply_onroad_ui_export_patch.sh" --force-repair || apply_ec=$?
+  if [ "$apply_ec" -ne 0 ]; then
+    # apply puts openpilot's UI files back itself when it fails.
+    error "the onroad UI export patch failed (exit $apply_ec)"
+    exit "$apply_ec"
+  fi
   ONROAD_UI_EXPORT_APPLIED=1
 else
-  echo "ERROR: missing onroad UI export patch apply helper" >&2
+  error "missing onroad UI export patch apply helper"
   exit 1
 fi
 
 if [ ! -f "$INSTALL_DIR/commaviewd" ]; then
-  echo "ERROR: bundle missing $INSTALL_DIR/commaviewd" >&2
+  error "bundle missing $INSTALL_DIR/commaviewd"
   exit 1
 fi
 capnp_lib_count=$(find "$INSTALL_DIR/lib" -maxdepth 1 -type f -name 'libcapnp-*.so' | wc -l | tr -d ' ')
 kj_lib_count=$(find "$INSTALL_DIR/lib" -maxdepth 1 -type f -name 'libkj-*.so' | wc -l | tr -d ' ')
 if [ "$capnp_lib_count" -eq 0 ] || [ "$kj_lib_count" -eq 0 ]; then
-  echo "ERROR: bundle missing required runtime libs in $INSTALL_DIR/lib" >&2
+  error "bundle missing required runtime libs in $INSTALL_DIR/lib"
   exit 1
 fi
 
@@ -775,17 +916,25 @@ chmod +x "$INSTALL_DIR/commaviewd"
 BINARY_SIZE=$(ls -lh "$INSTALL_DIR/commaviewd" | awk '{print $5}')
 
 install_boot_hook
+# On disk before the new runtime starts: a power loss from here on boots a whole release.
+sync
 
+stage restarting "$RELEASE_TAG"
 echo "Starting CommaView runtime..."
-bash "$INSTALL_DIR/start.sh"
+without_maint_lock_fd bash "$INSTALL_DIR/start.sh"
 if ! wait_for_control_api; then
   # The cleanup trap puts the previous release back and starts it.
-  echo "ERROR: the ${RELEASE_TAG} runtime did not answer on its control API; rolling back" >&2
+  error "the ${RELEASE_TAG} runtime did not answer on its control API; rolling back"
   stop_commaview_processes || true
   exit 1
 fi
-print_pairing_code
+# A queued install updates an app that is already paired: no new pair code (and none in its log).
+if [ "${COMMAVIEWD_DEFERRED_JOB:-0}" != "1" ]; then
+  print_pairing_code
+fi
 INSTALL_SUCCESS=1
+prune_install_backups
+stage done "$RELEASE_TAG"
 
 echo ""
 echo "=== CommaView ${VERSION} installed ==="

@@ -16,9 +16,26 @@ BEFORE_OPENPILOT=0
 UI_PREFIX=""
 REQUESTED_UI_PLATFORM="auto"
 
-# Read-only git commands must not rewrite .git/index: launch_chffrplus.sh skips a
-# staged openpilot update when anything under .git is newer than .overlay_init.
+# No git command here may rewrite .git/index: launch_chffrplus.sh skips a staged
+# openpilot update when anything under .git is newer than .overlay_init. Reads run
+# without optional locks, and files are restored from HEAD with git cat-file, never
+# git checkout or git reset.
 export GIT_OPTIONAL_LOCKS=0
+
+MAINT_LOCK="${COMMAVIEWD_MAINT_LOCK:-${COMMAVIEWD_DEFERRED_DIR:-/data/commaview-deferred}/maint.lock}"
+
+# One CommaView maintenance at a time: install, uninstall, this patch and its revert
+# and the deferred queue's job all rewrite the same files. A caller holding the lock
+# (install.sh, the deferred job) says so in the environment. Without flock, or where
+# the lock file can't be made, it runs unlocked as before.
+take_maint_lock() {
+  [ "${COMMAVIEWD_MAINT_LOCK_HELD:-0}" = "1" ] && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$MAINT_LOCK")" 2>/dev/null || return 0
+  { exec {MAINT_LOCK_FD}>>"$MAINT_LOCK"; } 2>/dev/null || return 0
+  flock -w "$1" "$MAINT_LOCK_FD" || return 1
+  export COMMAVIEWD_MAINT_LOCK_HELD=1 COMMAVIEWD_MAINT_LOCK_FD="$MAINT_LOCK_FD"
+}
 
 read_param() {
   local path="$PARAMS_DIR/$1"
@@ -29,11 +46,19 @@ read_param() {
 # openpilot and sunnypilot publish IsOffroad; upstream no longer has an IsOnroad
 # param, so reading only IsOnroad always looked offroad - even while driving.
 # IsOnroad stays a fallback for older builds and bench rigs. Prints 1 when onroad.
+# Anything uncertain is onroad: only a machine without openpilot's params at all (a
+# bench or CI checkout) reads offroad when neither param says.
 read_is_onroad() {
   case "$(read_param IsOffroad)" in
     0) echo 1 ;;
     1) echo 0 ;;
-    *) if [ "$(read_param IsOnroad)" = "1" ]; then echo 1; else echo 0; fi ;;
+    *)
+      case "$(read_param IsOnroad)" in
+        1) echo 1 ;;
+        0) echo 0 ;;
+        *) if [ -d "$PARAMS_DIR" ]; then echo 1; else echo 0; fi ;;
+      esac
+      ;;
   esac
 }
 
@@ -197,6 +222,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# At boot the hook's whole step is bounded (start.sh), so wait less there.
+maint_lock_wait=30
+[ "$BEFORE_OPENPILOT" = "1" ] && maint_lock_wait=10
+if ! take_maint_lock "$maint_lock_wait"; then
+  echo "ERROR: another CommaView install, uninstall or repair is running; try again when it has finished" >&2
+  exit 1
+fi
+
 ensure_offroad_ready
 
 if [ "$BEFORE_OPENPILOT" = "1" ] && ! openpilot_running; then
@@ -310,7 +343,7 @@ restore_managed_targets_from_backup() {
         restore_ec=1
         continue
       fi
-      if ! cp -a "$backup_root/$rel" "$OP_ROOT/$rel"; then
+      if ! atomic_copy "$backup_root/$rel" "$OP_ROOT/$rel"; then
         echo "WARN: failed to restore managed rollback target from backup: $rel" >&2
         restore_ec=1
       fi
@@ -382,26 +415,67 @@ managed_targets_digest() {
   done < <(managed_targets)
 }
 
+# Replaces dst with src's content all at once: a temp file beside it, synced, then
+# renamed over it, so a kill or power loss leaves openpilot the old file or the new
+# one, never a truncated one.
+atomic_copy() {
+  local src="$1" dst="$2" tmp
+  tmp="$(dirname "$dst")/.$(basename "$dst").commaview-tmp.$$"
+  if ! cp -p "$src" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  sync "$tmp" 2>/dev/null || sync
+  mv -f "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
+}
+
+# Puts a managed target back the way openpilot's HEAD has it (removes it when HEAD
+# has none). The original is read with git cat-file and only a file that differs is
+# replaced, atomically: git checkout and git reset would rewrite .git/index.
+restore_target_from_head() {
+  local rel="$1"
+  local dst="$OP_ROOT/$rel"
+  local tmp
+  if ! git -C "$OP_ROOT" cat-file -e "HEAD:./$rel" 2>/dev/null; then
+    if ! rm -f "$dst"; then
+      echo "WARN: failed to remove untracked managed target: $rel" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if ! mkdir -p "$(dirname "$dst")"; then
+    echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
+    return 1
+  fi
+  tmp="$(dirname "$dst")/.$(basename "$dst").commaview-head.$$"
+  if ! git -C "$OP_ROOT" cat-file -p "HEAD:./$rel" > "$tmp"; then
+    rm -f "$tmp"
+    echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
+    return 1
+  fi
+  if [ -f "$dst" ] && cmp -s "$tmp" "$dst"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if [ -f "$dst" ]; then
+    chmod --reference="$dst" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+  else
+    chmod 644 "$tmp"
+  fi
+  sync "$tmp" 2>/dev/null || sync
+  if ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp"
+    echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
+    return 1
+  fi
+}
+
 reset_managed_targets() {
   local rel=""
   local reset_ec=0
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
-    if ! git -C "$OP_ROOT" reset -q HEAD -- "$rel" >/dev/null 2>&1; then
-      echo "WARN: failed to reset managed target index: $rel" >&2
-      reset_ec=1
-    fi
-    if git -C "$OP_ROOT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
-      if ! git -C "$OP_ROOT" checkout -- "$rel"; then
-        echo "WARN: failed to restore tracked managed target from HEAD: $rel" >&2
-        reset_ec=1
-      fi
-    else
-      if ! rm -f "$OP_ROOT/$rel"; then
-        echo "WARN: failed to remove untracked managed target: $rel" >&2
-        reset_ec=1
-      fi
-    fi
+    restore_target_from_head "$rel" || reset_ec=1
   done < <(managed_targets)
   return "$reset_ec"
 }
@@ -425,6 +499,48 @@ force_repair_managed_targets() {
       echo "ERROR: failed to reset managed onroad UI export transformer targets and rollback failed or incomplete from $backup_root" >&2
     fi
     return 1
+  fi
+}
+
+# Without --force-repair only CommaView's own changes are undone. A managed file that
+# is damaged (missing, cut short by a kill or power loss mid-write, or no longer
+# compiling) or holds an older CommaView patch is restored from openpilot's HEAD and
+# patched again; at boot that keeps a half-written file from breaking openpilot's UI.
+# Anyone else's change stops the apply (exit 44) and is left as it is.
+repair_damaged_managed_targets() {
+  local classes="" class="" rel="" foreign="" backup_root="" restore_ec=0
+  local -a targets=() repair=()
+  mapfile -t targets < <(managed_targets)
+  if ! classes="$(python3 "$TRANSFORMER" --op-root "$OP_ROOT" --flavor "$flavor" --classify "${targets[@]}")"; then
+    echo "ERROR: unable to check the onroad UI export transformer targets against $OP_ROOT HEAD" >&2
+    exit 1
+  fi
+  while read -r class rel; do
+    case "$class" in
+      damaged|ours) repair+=("$rel") ;;
+      foreign) foreign="$foreign$rel"$'\n' ;;
+    esac
+  done <<< "$classes"
+  if [ -n "$foreign" ]; then
+    echo "ERROR: onroad UI export transformer target files have local changes:" >&2
+    printf '%s' "$foreign" >&2
+    echo "ERROR: refusing to modify dirty upstream files without --force-repair" >&2
+    exit 44
+  fi
+  [ "${#repair[@]}" -gt 0 ] || return 0
+  if ! backup_root="$(backup_managed_targets)"; then
+    echo "ERROR: failed to back up managed onroad UI export transformer targets; refusing repair" >&2
+    exit 1
+  fi
+  echo "WARN: restoring damaged or outdated onroad UI export targets from $OP_ROOT HEAD: ${repair[*]}" >&2
+  echo "WARN: backups written to $backup_root" >&2
+  for rel in "${repair[@]}"; do
+    restore_target_from_head "$rel" || restore_ec=1
+  done
+  if [ "$restore_ec" -ne 0 ]; then
+    restore_managed_targets_from_backup "$backup_root" || true
+    echo "ERROR: failed to restore onroad UI export targets from HEAD; restored managed targets from $backup_root" >&2
+    exit 1
   fi
 }
 
@@ -508,16 +624,10 @@ fi
 
 targets_before="$(managed_targets_digest)"
 
-if dirty_targets="$(dirty_managed_targets)" && [ -n "$dirty_targets" ]; then
-  if [ "$FORCE_REPAIR" != "1" ]; then
-    echo "ERROR: onroad UI export transformer target files have local changes:" >&2
-    printf '%s\n' "$dirty_targets" >&2
-    echo "ERROR: refusing to modify dirty upstream files without --force-repair" >&2
-    exit 44
-  fi
+if [ "$FORCE_REPAIR" = "1" ]; then
   force_repair_managed_targets
-elif [ "$FORCE_REPAIR" = "1" ]; then
-  force_repair_managed_targets
+else
+  repair_damaged_managed_targets
 fi
 
 if ! transform_backup_root="$(backup_managed_targets)"; then
