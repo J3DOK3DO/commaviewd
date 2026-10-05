@@ -8,6 +8,17 @@
 # manager is up and either IsOffroad has read 1 for STABLE_SEC in a row or commaviewd road-phase
 # has read parked for PARKED_STABLE_SEC in a row. Every POLL_SEC it reads one param file and, only
 # while onroad, runs road-phase once (a read-only peek at openpilot's queues; no subscriber).
+# A queued install (an update included) is judged by the release it installs, not by the installed
+# runtime, whose parked rules may be older (a runtime from before "no car" would never see a bench
+# comma as parked, and so never run its own update). install.sh keeps that release's road-phase
+# (the binary, its lib/ and its tag) in road-phase/ beside the queue when it queues itself; for a
+# job queued without it (the app's update queues the installed install.sh --tag), the waiter first
+# runs the job with --stage-only while the car reads as driving: download, verify and unpack the
+# release at low priority under the maintenance lock, keep its road-phase, install nothing. From
+# then on the waiter asks the kept road-phase. It is the same read-only peek as the installed one.
+# A release whose installer predates --stage-only refuses the option (exit 1) and changes nothing;
+# the waiter then keeps asking the installed runtime.
+#
 # Nothing here ever asks openpilot to go offroad (no OffroadMode): a drive is never interrupted
 # for CommaView, and a job that finds the car being driven when it starts (exit 42) waits again.
 #
@@ -35,9 +46,10 @@ PROC_ROOT="${COMMAVIEWD_PROC_ROOT:-/proc}"
 STABLE_SEC="${COMMAVIEWD_DEFERRED_OFFROAD_STABLE_SEC:-60}"
 PARKED_STABLE_SEC="${COMMAVIEWD_DEFERRED_PARKED_STABLE_SEC:-20}"
 ROAD_PHASE_BIN="${COMMAVIEWD_ROAD_PHASE_BIN:-/data/commaview/commaviewd}"
-# A queued first install has no runtime installed to ask: install.sh keeps the release's own
-# road-phase (the binary and its lib/) here for it.
+# The road-phase of the release a queued install installs (see above).
 ROAD_PHASE_KIT="${COMMAVIEWD_ROAD_PHASE_KIT:-$STATE_DIR/road-phase}"
+# A failed staging (no network, say) is tried again this often while the job waits.
+STAGE_RETRY_SEC="${COMMAVIEWD_DEFERRED_STAGE_RETRY_SEC:-600}"
 POLL_SEC="${COMMAVIEWD_DEFERRED_POLL_SEC:-10}"
 REQUIRE_MANAGER="${COMMAVIEWD_DEFERRED_REQUIRE_MANAGER:-1}"
 # A job that finds the car being driven when it starts (exit 42) goes back to waiting, this often.
@@ -125,12 +137,36 @@ manager_running() {
   return 1
 }
 
-# The road-phase to ask: the installed runtime's, else the one a queued first install kept.
-road_phase_bin() {
-  if [ -x "$ROAD_PHASE_BIN" ]; then
-    printf '%s\n' "$ROAD_PHASE_BIN"
-  elif [ -x "$ROAD_PHASE_KIT/commaviewd" ]; then
+# The release a queued install installs: the value after --tag in its command, if any.
+job_tag() {
+  [ "$(job_value action)" = "install" ] && [ -f "$JOB_DIR/args" ] || return 1
+  local -a a=()
+  local i
+  mapfile -t -d '' a < "$JOB_DIR/args"
+  for ((i = 0; i + 1 < ${#a[@]}; i++)); do
+    if [ "${a[$i]}" = "--tag" ]; then
+      printf '%s\n' "${a[$((i + 1))]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The kept road-phase, when it is the queued install's release.
+road_phase_kit_bin() {
+  local tag
+  tag="$(job_tag)" && [ -n "$tag" ] && [ -x "$ROAD_PHASE_KIT/commaviewd" ] && \
+    [ "$(tr -d '\r\n' < "$ROAD_PHASE_KIT/tag" 2>/dev/null)" = "$tag" ] && \
     printf '%s\n' "$ROAD_PHASE_KIT/commaviewd"
+}
+
+# The road-phase to ask: the release about to be installed (its rules are the newest), else the
+# installed runtime's.
+road_phase_bin() {
+  if road_phase_kit_bin; then
+    return 0
+  elif [ -x "$ROAD_PHASE_BIN" ]; then
+    printf '%s\n' "$ROAD_PHASE_BIN"
   else
     return 1
   fi
@@ -279,6 +315,34 @@ cmd_queue() {
   cat "$STATUS"
 }
 
+# A queued install whose release's road-phase isn't kept yet stages that release first (see above):
+# its installer with --stage-only, under the maintenance lock, changing nothing installed. Returns 1
+# while the maintenance lock is busy (the waiter tries again next poll).
+NEXT_STAGE_AT=0
+stage_queued_release() {
+  local tag ec now
+  local -a args=()
+  tag="$(job_tag)" || return 0
+  [ -n "$tag" ] || return 0
+  road_phase_kit_bin >/dev/null && return 0
+  now="$(date +%s)"
+  [ "$now" -ge "$NEXT_STAGE_AT" ] || return 0
+  take_job_lock || return 1
+  mapfile -t -d '' args < "$JOB_DIR/args"
+  log "staging $tag to ask its own road-phase"
+  ( cd / && COMMAVIEWD_DEFERRED_JOB=1 COMMAVIEWD_MAINT_LOCK_HELD=1 COMMAVIEWD_DEFERRED_DIR="$STATE_DIR" \
+      COMMAVIEWD_ROAD_PHASE_KIT="$ROAD_PHASE_KIT" without_lock_fds "${args[@]}" --stage-only ) >> "$LOG" 2>&1
+  ec=$?
+  release_job_lock
+  if road_phase_kit_bin >/dev/null; then
+    log "staged $tag (exit $ec): its road-phase decides"
+  else
+    log "could not stage $tag (exit $ec); asking the installed runtime, staging again in ${STAGE_RETRY_SEC}s"
+    NEXT_STAGE_AT=$(( $(date +%s) + STAGE_RETRY_SEC ))
+  fi
+  return 0
+}
+
 cmd_wait() {
   release_inherited_fds
   # Two waiters (two resumes at once, a queue racing a resume) would run the job twice: the second
@@ -296,6 +360,15 @@ cmd_wait() {
   local -a args=()
   while [ -f "$JOB_DIR/args" ]; do
     phase="$(maintenance_phase)"
+    if [ "$phase" = "driving" ] && manager_running && ! openpilot_offroad; then
+      if ! stage_queued_release; then
+        log "another CommaView install, uninstall or repair is running; staging waits for it"
+        nap
+        continue
+      fi
+      [ -f "$JOB_DIR/args" ] || break
+      phase="$(maintenance_phase)"
+    fi
     if [ "$phase" = "driving" ]; then
       stable=0
     elif [ "$phase" = "$prev_phase" ]; then
@@ -384,7 +457,7 @@ cmd_cancel() {
   fi
   rm -f "$PROGRESS"
   rm -f "$STATE_DIR/waiter.pid"
-  # Only a queued first install needs it; a direct run or another job doesn't.
+  # Only a queued install needs it; a direct run or another job doesn't.
   rm -rf "$ROAD_PHASE_KIT"
 }
 
