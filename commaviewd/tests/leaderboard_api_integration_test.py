@@ -221,6 +221,32 @@ def main():
             assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (200, statement)
             assert statement_runs() == runs_before + 2
             assert json.loads((install / "data" / "leaderboard-seq.json").read_text())["seq"] == 2
+            assert "commaStats" not in payload  # no comma totals saved yet
+
+            # comma's totals from sunnypilot's cache (Driving insights): never in a statement, and not
+            # a reason to sign again.
+            (install / "data" / "drive-stats.json").write_text(json.dumps(
+                {"version": 1, "source": "sunnypilot", "fetchedAtMs": today - day_ms,
+                 "all": {"routes": 1349, "distanceMi": 99999.0, "minutes": 26000},
+                 "week": {"routes": 28, "distanceMi": 105.25, "minutes": 372}}))
+            assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (200, statement)
+            assert statement_runs() == runs_before + 2
+
+            # The runtime's own request to comma answered: signed again, with comma's all-time
+            # distance in metres and when it asked; the days are as they were.
+            fetched_ms = today - day_ms
+            (install / "data" / "comma-api-stats.json").write_text(json.dumps(
+                {"version": 1, "source": "comma-api", "fetchedAtMs": fetched_ms,
+                 "all": {"routes": 1349, "distanceMi": 13027.4, "minutes": 26000}}))
+            days_before = payload["days"]
+            status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
+            assert status == 200 and statement["seq"] == 3 and statement_runs() == runs_before + 3
+            payload = parts(statement["statement"])[1]
+            assert payload["commaStats"] == {"allTimeM": 20965568, "fetchedAtMs": fetched_ms, "source": "comma-api"}
+            assert payload["days"] == days_before
+            verify(statement["statement"], public_x)
+            assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (200, statement)
+            assert statement_runs() == runs_before + 3
 
             # The key gone (an uninstall that kept the drive list): no key, as before, and no cache left.
             key_file.rename(root / "key-aside.json")
@@ -228,7 +254,7 @@ def main():
             assert not cache_file.exists()
             (root / "key-aside.json").rename(key_file)
             status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
-            assert status == 200 and statement["seq"] == 3
+            assert status == 200 and statement["seq"] == 4
 
             # Rotating makes a new key, whose counter starts again.
             status, rotated = request(port, "/commaview/leaderboard/register", token=TOKEN,

@@ -10,18 +10,23 @@ stays running between drives.
                refresh comma's totals.
   totals       Refresh comma's past-week and all-time totals for this comma: sunnypilot's cached
                copy (ApiCache_DriveStats) when it has one, otherwise one request to comma made with
-               the comma's own identity, as sunnypilot's Trips page does.
+               the comma's own identity, as sunnypilot's Trips page does. What that request answers is
+               also kept apart (data/comma-api-stats.json) for the leaderboard, which never takes a
+               figure from sunnypilot's copy; with a fresh copy the request is still made, at most
+               every 6 hours.
   position     While a drive goes on and location is on: where the car was at the end of the drive's
                last finished log minute. The fallback when the comma's GPS can't be read directly.
   leaderboard-register, leaderboard-statement
                For a paired phone, while the control service waits: this comma's leaderboard key
                signs a registration (for the account service's challenge) or a statement of its
-               drives grouped into UTC days. The answer is one JSON line on stdout.
+               drives grouped into UTC days, with comma's all-time distance for this comma when the
+               runtime's own request to comma has fetched it (data/comma-api-stats.json). The answer
+               is one JSON line on stdout.
 
-Files (under ROOT unless noted): data/drives.json, data/drive-stats.json, and only while location is
-on data/location-last.json and LIVE_DIR/location-log.json. Positions are never logged. Once the
-comma joins the leaderboard: data/leaderboard-key.json (its private key, 0600, never logged) and
-data/leaderboard-seq.json (the statement counter).
+Files (under ROOT unless noted): data/drives.json, data/drive-stats.json, data/comma-api-stats.json,
+and only while location is on data/location-last.json and LIVE_DIR/location-log.json. Positions are
+never logged. Once the comma joins the leaderboard: data/leaderboard-key.json (its private key, 0600,
+never logged) and data/leaderboard-seq.json (the statement counter).
 """
 
 from __future__ import annotations
@@ -45,6 +50,8 @@ DEVICE_MODEL_FILE = os.environ.get("COMMAVIEW_DRIVE_DEVICE_MODEL_FILE", "/sys/fi
 
 DRIVES_FILE = os.path.join(ROOT, "data", "drives.json")
 STATS_FILE = os.path.join(ROOT, "data", "drive-stats.json")
+# Only what this runtime's own request to comma answered: the leaderboard's source for commaStats.
+COMMA_API_FILE = os.path.join(ROOT, "data", "comma-api-stats.json")
 LOCATION_CONFIG_FILE = os.path.join(ROOT, "config", "location.json")
 LOCATION_LAST_FILE = os.path.join(ROOT, "data", "location-last.json")
 LOCATION_LOG_FILE = os.path.join(LIVE_DIR, "location-log.json")
@@ -329,6 +336,34 @@ def fetch_totals_from_comma() -> dict:
 
 # sunnypilot refreshes its copy every 30 s while its UI is up; an hour-old copy still beats a request.
 CACHE_FRESH_MS = 60 * 60 * 1000
+# The leaderboard's figure comes only from this runtime's own request (anyone on the comma can edit
+# sunnypilot's copy): made at least this often while sunnypilot's copy is fresh, when comma answers,
+COMMA_API_REFRESH_MS = 6 * 60 * 60 * 1000
+# and tried again no sooner than this after it failed.
+COMMA_API_RETRY_MS = 60 * 60 * 1000
+COMMA_API_SOURCE = "comma-api"
+
+
+def save_comma_api(totals: dict, fetched_ms: int) -> None:
+  write_json_atomic(COMMA_API_FILE, {"version": 1, "source": COMMA_API_SOURCE, "fetchedAtMs": fetched_ms,
+                                     "all": totals["all"]})
+
+
+def comma_api_due(now_ms: int) -> bool:
+  """Whether the runtime's own figure is old enough (or missing) to ask comma for it again."""
+  own = read_json(COMMA_API_FILE)
+  own = own if isinstance(own, dict) else {}
+  fetched, tried = own.get("fetchedAtMs"), own.get("lastAttemptAtMs")
+  if valid_wall(fetched) and 0 <= now_ms - fetched < COMMA_API_REFRESH_MS:
+    return False
+  return not (valid_wall(tried) and 0 <= now_ms - tried < COMMA_API_RETRY_MS)
+
+
+def note_comma_api_failure(now_ms: int) -> None:
+  own = read_json(COMMA_API_FILE)
+  own = own if isinstance(own, dict) else {"version": 1}
+  own["lastAttemptAtMs"] = now_ms
+  write_json_atomic(COMMA_API_FILE, own)
 
 
 def refresh_totals(now_ms: int, fetch=fetch_totals_from_comma, cache=cached_totals) -> dict:
@@ -337,9 +372,18 @@ def refresh_totals(now_ms: int, fetch=fetch_totals_from_comma, cache=cached_tota
   cached = cache()
   if cached is not None and now_ms - cached[1] <= CACHE_FRESH_MS:
     saved = {"version": 1, "source": "sunnypilot", "fetchedAtMs": cached[1], **cached[0]}
+    if comma_api_due(now_ms):
+      # Driving insights keeps sunnypilot's copy; this answer is only the leaderboard's.
+      try:
+        save_comma_api(fetch(), now_ms)
+      except Exception as e:
+        note_comma_api_failure(now_ms)
+        log(f"comma's totals unavailable: {str(e)[:120]}")
   else:
     try:
-      saved = {"version": 1, "source": "comma", "fetchedAtMs": now_ms, **fetch()}
+      totals = fetch()
+      saved = {"version": 1, "source": "comma", "fetchedAtMs": now_ms, **totals}
+      save_comma_api(totals, now_ms)
     except Exception as e:  # offline, unregistered, or comma said no: keep the last totals
       if cached is not None and cached[1] > int(saved.get("fetchedAtMs") or 0):
         saved = {"version": 1, "source": "sunnypilot", "fetchedAtMs": cached[1], **cached[0]}
@@ -356,6 +400,12 @@ def refresh_totals(now_ms: int, fetch=fetch_totals_from_comma, cache=cached_tota
 # comma's own Ed25519 key signs compact JWS (EdDSA) over canonical JSON, and the phone only relays
 # them. The private key never leaves this file's two functions that read and write it: it is never
 # printed, logged or answered, and the control service leaves it out of support bundles.
+#
+# A statement's payload: {"v": 1, "seq", "issuedAtMs", "days": [{day, distanceM, durationS, drives}],
+# and optionally "deviceType", "runtimeVersion" and "commaStats": {"allTimeM", "fetchedAtMs", "source":
+# "comma-api"}} -- comma's all-time distance for this comma in whole metres, from the runtime's own
+# request to comma, and when that request was made, for the lifetime board; left out when there's no
+# such figure. Awards and weekly totals come from `days` only.
 
 LEADERBOARD_KEY_FILE = os.path.join(ROOT, "data", "leaderboard-key.json")
 LEADERBOARD_SEQ_FILE = os.path.join(ROOT, "data", "leaderboard-seq.json")
@@ -365,6 +415,9 @@ VERSION_FILE = os.path.join(ROOT, "VERSION")
 LEADERBOARD_MAX_DAYS = 62
 LEADERBOARD_MAX_SEQ = 2_147_483_647
 LEADERBOARD_TEXT_MAX = 40
+METRES_PER_MILE = 1609.344
+# Over a million miles (and still a 32-bit int): anything more isn't a comma's all-time distance.
+COMMA_ALL_TIME_MAX_M = 2_000_000_000
 DEVICE_HASH_PREFIX = "commaview-leaderboard-device/v1:"
 # The device types openpilot knows (cereal InitData.DeviceType): comma 3, comma 3X, comma four.
 DEVICE_TYPES = ("tici", "tizi", "mici")
@@ -591,8 +644,34 @@ def registration_token(key, challenge: str, issued_ms: int) -> str:
   return jws(key, {"alg": "EdDSA", "kid": key_id(x), "typ": "cv-lb-reg+jwt"}, payload)
 
 
+def comma_stats(issued_ms: int) -> dict | None:
+  """comma's all-time distance for this comma, as the runtime's own request to comma last answered it
+  (data/comma-api-stats.json; never sunnypilot's ApiCache_DriveStats, which anyone on the comma can
+  edit): {allTimeM, fetchedAtMs, source}, or None when there's no such figure. Read from that file
+  only, so signing stays fast and offline, and the control service's cached statement (keyed on that
+  file too) is signed again when it changes. However old the figure is, it's sent with when it was
+  fetched: the account service and the app decide what's fresh enough."""
+  saved = read_json(COMMA_API_FILE)
+  if not isinstance(saved, dict) or saved.get("source") != COMMA_API_SOURCE:
+    return None
+  fetched_ms, all_time = saved.get("fetchedAtMs"), saved.get("all")
+  if not valid_wall(fetched_ms) or not (valid_wall(issued_ms) and fetched_ms <= issued_ms):
+    return None
+  miles = all_time.get("distanceMi") if isinstance(all_time, dict) else None
+  if isinstance(miles, bool) or not isinstance(miles, (int, float)) or not 0 <= miles < float("inf"):
+    return None  # also NaN
+  metres = int(round(miles * METRES_PER_MILE))
+  if metres > COMMA_ALL_TIME_MAX_M:
+    return None
+  return {"allTimeM": metres, "fetchedAtMs": fetched_ms, "source": COMMA_API_SOURCE}
+
+
 def statement_token(key, seq: int, issued_ms: int, days: list) -> str:
   payload = {"v": 1, "seq": seq, "issuedAtMs": issued_ms, "days": days}
+  # Optional: comma's lifetime figure for the lifetime board. Awards and weekly totals stay with `days`.
+  stats = comma_stats(issued_ms)
+  if stats is not None:
+    payload["commaStats"] = stats
   kind = device_type()  # also here, so a comma registered before it was sent gets it on its next statement
   if kind:
     payload["deviceType"] = kind
@@ -617,8 +696,8 @@ def leaderboard_register(challenge: str, rotate: bool, now_ms: int) -> dict:
 
 
 def leaderboard_statement(now_ms: int) -> dict:
-  """This comma's drives by UTC day, signed with the next seq (saved before it's signed):
-  {ok, statement, keyId, seq}."""
+  """This comma's drives by UTC day, and comma's all-time distance when known, signed with the next
+  seq (saved before it's signed): {ok, statement, keyId, seq}."""
   with LeaderboardLock():
     seed = load_seed()
     if seed is None:

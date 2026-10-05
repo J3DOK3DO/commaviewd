@@ -62,6 +62,17 @@ STATEMENT_TIZI = (
   ".dkwq7gp1Afuop_SGqy44_GhRVOgJszDyfZO0SD7ZTVMmq59RHxOz1Cirn6-4dafG2voWvMXQle5V8epZrSu6Dg"
 )
 
+# The same statement from the comma 3X with comma's all-time distance (commaStats): 13027.4 mi, as the
+# runtime's own request to comma answered it an hour before the statement.
+STATEMENT_COMMA_STATS = (
+  "eyJhbGciOiJFZERTQSIsImtpZCI6IldXcG5fcGZIdWk5WUtSNENadFFzREdNdTdfR2NoMnpZQ2hmU3ZueGd0UGsiLCJ0eXAiOiJjdi1sYi1zdGF0cytqd3QifQ"
+  ".eyJjb21tYVN0YXRzIjp7ImFsbFRpbWVNIjoyMDk2NTU2OCwiZmV0Y2hlZEF0TXMiOjE3OTA4OTU2MDAwMDAsInNvdXJjZSI6ImNvbW1hLWFwaSJ9LCJk"
+  "YXlzIjpbeyJkYXkiOiIyMDI2LTA5LTMwIiwiZGlzdGFuY2VNIjo1MTIzNCwiZHJpdmVzIjoyLCJkdXJhdGlvblMiOjM2MDB9LHsiZGF5IjoiMjAyNi0x"
+  "MC0wMSIsImRpc3RhbmNlTSI6MTIwMCwiZHJpdmVzIjoxLCJkdXJhdGlvblMiOjMwMH1dLCJkZXZpY2VUeXBlIjoidGl6aSIsImlzc3VlZEF0TXMiOjE3"
+  "OTA4OTkyMDAwMDAsInJ1bnRpbWVWZXJzaW9uIjoidjAuMC42MCIsInNlcSI6MSwidiI6MX0"
+  ".VsZQwzBoQr2XNxupPQlvdkJQtZlyJD5EglynfX-KRPC5P5Lsp2bmXl-euG5GDj6XgbpMWsR5vDIW5UGwpjIfBg"
+)
+
 
 @pytest.fixture
 def lb(tmp_path, monkeypatch):
@@ -180,6 +191,199 @@ def test_a_statement_carries_the_device_type_byte_for_byte(lb):
   the_vector_drives(lb)
   answer = lb.leaderboard_statement(ISSUED_MS)
   assert answer == {"ok": True, "statement": STATEMENT_TIZI, "keyId": KID, "seq": 1}
+
+
+# ---------------------------------------------------------------- comma's all-time distance
+
+COMMA_TOTALS = {"all": {"routes": 1349, "distanceMi": 13027.4, "minutes": 26000},
+                "week": {"routes": 28, "distanceMi": 105.25, "minutes": 372}}
+FETCHED_MS = ISSUED_MS - 3_600_000
+
+
+def write_own_totals(lb, fetched_ms, all_time=None):
+  """data/comma-api-stats.json as the totals mode keeps what its own request to comma answered."""
+  lb.write_json_atomic(lb.COMMA_API_FILE, {"version": 1, "source": "comma-api", "fetchedAtMs": fetched_ms,
+                                           "all": all_time if all_time is not None else COMMA_TOTALS["all"]})
+
+
+def write_sunnypilot_cache(lb, saved_ms, distance_mi):
+  """sunnypilot's ApiCache_DriveStats (comma's own field names), saved at saved_ms."""
+  cache = lb.test_params / "ApiCache_DriveStats"
+  cache.write_text(json.dumps({"all": {"routes": 10, "distance": distance_mi, "minutes": 900},
+                               "week": {"routes": 1, "distance": 12.0, "minutes": 20}}))
+  os.utime(cache, (saved_ms / 1000, saved_ms / 1000))
+
+
+def offline():
+  raise OSError("offline")
+
+
+def test_a_statement_with_comma_stats_is_the_test_vector_byte_for_byte(lb):
+  the_vector_comma(lb, "comma tizi")
+  the_vector_drives(lb)
+  write_own_totals(lb, FETCHED_MS)
+  answer = lb.leaderboard_statement(ISSUED_MS)
+  assert answer == {"ok": True, "statement": STATEMENT_COMMA_STATS, "keyId": KID, "seq": 1}
+  assert verify(STATEMENT_COMMA_STATS, X)
+  payload = parts(STATEMENT_COMMA_STATS)[1]
+  assert payload["v"] == 1
+  # 13027.4 mi in metres, and when the runtime asked comma for it.
+  assert payload["commaStats"] == {"allTimeM": 20965568, "fetchedAtMs": FETCHED_MS, "source": "comma-api"}
+  # The same days as without it: awards and weekly totals come from these alone.
+  assert {k: v for k, v in payload.items() if k != "commaStats"} == parts(STATEMENT_TIZI)[1]
+
+
+def test_a_figure_only_sunnypilots_cache_has_never_reaches_the_statement(lb):
+  # Anyone on the comma can edit ApiCache_DriveStats: Driving insights may show it, the leaderboard never.
+  the_vector_comma(lb)
+  the_vector_drives(lb)
+  write_sunnypilot_cache(lb, ISSUED_MS - 60_000, 999_999.0)
+  saved = lb.refresh_totals(ISSUED_MS, fetch=offline)  # our own request fails
+  assert saved["source"] == "sunnypilot" and saved["all"]["distanceMi"] == 999_999.0
+  assert lb.leaderboard_statement(ISSUED_MS)["statement"] == STATEMENT  # byte for byte, no commaStats
+  # Nor when sunnypilot's figure is the only one in drive-stats.json, however it got there.
+  lb.write_json_atomic(lb.STATS_FILE, {"version": 1, "source": "comma", "fetchedAtMs": ISSUED_MS - 1000, **COMMA_TOTALS})
+  assert "commaStats" not in parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]
+
+
+def test_with_sunnypilots_cache_fresh_the_runtime_still_asks_comma_itself(lb):
+  the_vector_comma(lb)
+  write_sunnypilot_cache(lb, ISSUED_MS - 60_000, 999_999.0)
+  asked = []
+
+  def comma():
+    asked.append(1)
+    return lb.normalize_stats({"all": {"routes": 10, "distance": 1234.5, "minutes": 900}})
+  saved = lb.refresh_totals(ISSUED_MS, fetch=comma)
+  assert asked == [1] and saved["source"] == "sunnypilot"  # Driving insights keeps the cache
+  payload = parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]
+  # Its own answer (1234.5 mi), at the time it asked: never the cache's figure or the cache's time.
+  assert payload["commaStats"] == {"allTimeM": 1986735, "fetchedAtMs": ISSUED_MS, "source": "comma-api"}
+  # Asked again only after 6 hours.
+  for later in (ISSUED_MS + 60_000, ISSUED_MS + 6 * 3_600_000 - 1):
+    write_sunnypilot_cache(lb, later - 1000, 999_999.0)
+    lb.refresh_totals(later, fetch=comma)
+  assert asked == [1]
+  later = ISSUED_MS + 6 * 3_600_000
+  write_sunnypilot_cache(lb, later - 1000, 999_999.0)
+  lb.refresh_totals(later, fetch=comma)
+  assert asked == [1, 1]
+  assert parts(lb.leaderboard_statement(later)["statement"])[1]["commaStats"]["fetchedAtMs"] == later
+
+
+def test_a_failed_own_request_is_retried_after_an_hour_and_keeps_the_last_figure(lb):
+  the_vector_comma(lb)
+  write_own_totals(lb, ISSUED_MS - 7 * 3_600_000)
+  write_sunnypilot_cache(lb, ISSUED_MS - 1000, 5.0)
+  asked = []
+
+  def failing():
+    asked.append(1)
+    raise RuntimeError("http 500")
+  lb.refresh_totals(ISSUED_MS, fetch=failing)
+  write_sunnypilot_cache(lb, ISSUED_MS + 30 * 60_000 - 1000, 5.0)
+  lb.refresh_totals(ISSUED_MS + 30 * 60_000, fetch=failing)
+  assert asked == [1]
+  write_sunnypilot_cache(lb, ISSUED_MS + 3_600_000 - 1000, 5.0)
+  lb.refresh_totals(ISSUED_MS + 3_600_000, fetch=failing)
+  assert asked == [1, 1]
+  stats = parts(lb.leaderboard_statement(ISSUED_MS + 3_600_000)["statement"])[1]["commaStats"]
+  assert stats == {"allTimeM": 20965568, "fetchedAtMs": ISSUED_MS - 7 * 3_600_000, "source": "comma-api"}
+
+
+def test_comma_stats_from_the_request_totals_already_made(lb):
+  # No usable sunnypilot copy: the request Driving insights makes is the runtime's own, and counts.
+  the_vector_comma(lb)
+  fetched = ISSUED_MS - 2 * DAY
+  saved = lb.refresh_totals(fetched, fetch=lambda: lb.normalize_stats({"all": {"distance": 0.4}}), cache=lambda: None)
+  assert saved["source"] == "comma"
+  payload = parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]
+  assert payload["commaStats"] == {"allTimeM": 644, "fetchedAtMs": fetched, "source": "comma-api"}
+
+
+def test_old_comma_stats_still_go_with_when_they_were_fetched(lb):
+  # Offline for weeks: the last figure, with its time; the account service and the app judge it.
+  the_vector_comma(lb)
+  write_own_totals(lb, ISSUED_MS - 30 * DAY)
+  lb.refresh_totals(ISSUED_MS, fetch=offline, cache=lambda: None)
+  payload = parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]
+  assert payload["commaStats"] == {"allTimeM": 20965568, "fetchedAtMs": ISSUED_MS - 30 * DAY, "source": "comma-api"}
+
+
+def test_a_comma_with_nothing_driven_says_zero(lb):
+  the_vector_comma(lb)
+  write_own_totals(lb, ISSUED_MS - 1000, {"routes": 0, "distanceMi": 0.0, "minutes": 0})
+  assert parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]["commaStats"] == \
+    {"allTimeM": 0, "fetchedAtMs": ISSUED_MS - 1000, "source": "comma-api"}
+
+
+GOOD_ALL = COMMA_TOTALS["all"]
+
+
+@pytest.mark.parametrize("saved", [
+  None,                                                         # never fetched
+  "[not an object]",
+  {"version": 1, "lastAttemptAtMs": ISSUED_MS - 1000},          # only failed requests
+  {"version": 1, "fetchedAtMs": ISSUED_MS - 1000, "all": GOOD_ALL},                         # no source
+  {"version": 1, "source": "sunnypilot", "fetchedAtMs": ISSUED_MS - 1000, "all": GOOD_ALL},
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS - 1000},                   # no all-time
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS - 1000, "all": {"routes": 3}},
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS - 1000, "all": {"distanceMi": "12"}},
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS - 1000, "all": {"distanceMi": True}},
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS - 1000, "all": {"distanceMi": -1.0}},
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS - 1000, "all": {"distanceMi": 1e300}},
+  {"version": 1, "source": "comma-api", "all": GOOD_ALL},                                   # when isn't known
+  {"version": 1, "source": "comma-api", "fetchedAtMs": 1_000_000, "all": GOOD_ALL},          # clock not set
+  {"version": 1, "source": "comma-api", "fetchedAtMs": float(ISSUED_MS - 1000), "all": GOOD_ALL},
+  {"version": 1, "source": "comma-api", "fetchedAtMs": ISSUED_MS + 1, "all": GOOD_ALL},      # after it's signed
+])
+def test_no_comma_stats_without_an_own_all_time_figure(lb, saved):
+  the_vector_comma(lb)
+  the_vector_drives(lb)
+  if isinstance(saved, str):
+    Path(lb.COMMA_API_FILE).parent.mkdir(parents=True, exist_ok=True)
+    Path(lb.COMMA_API_FILE).write_text(saved)
+  elif saved is not None:
+    lb.write_json_atomic(lb.COMMA_API_FILE, saved)
+  answer = lb.leaderboard_statement(ISSUED_MS)
+  assert answer["statement"] == STATEMENT  # byte for byte as before commaStats
+  assert "commaStats" not in parts(answer["statement"])[1]
+
+
+def test_nan_miles_are_no_figure(lb):
+  the_vector_comma(lb)
+  Path(lb.COMMA_API_FILE).parent.mkdir(parents=True, exist_ok=True)
+  Path(lb.COMMA_API_FILE).write_text(
+    '{"version":1,"source":"comma-api","fetchedAtMs":%d,"all":{"distanceMi":NaN}}' % (ISSUED_MS - 1000))
+  assert "commaStats" not in parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]
+
+
+def test_signing_reads_comma_stats_without_asking_comma_or_sunnypilot(lb, monkeypatch):
+  the_vector_comma(lb)
+  write_own_totals(lb, ISSUED_MS - 1000)
+
+  def never(*_, **__):
+    raise AssertionError("statements are signed offline, from data/comma-api-stats.json")
+  for name in ("fetch_totals_from_comma", "cached_totals", "refresh_totals"):
+    monkeypatch.setattr(lb, name, never)
+  before = Path(lb.COMMA_API_FILE).read_bytes()
+  assert parts(lb.leaderboard_statement(ISSUED_MS)["statement"])[1]["commaStats"]["fetchedAtMs"] == ISSUED_MS - 1000
+  assert Path(lb.COMMA_API_FILE).read_bytes() == before
+
+
+def test_the_largest_statement_fits_the_account_services_limit(lb):
+  # 62 full days, the longest runtime version, a device type and commaStats: well under the
+  # account service's 16384 characters (LIMITS.maxStatementLength).
+  the_vector_comma(lb, "comma mici")
+  (lb.test_root / "VERSION").write_text("v" * 60 + "\n")
+  drives = [{"startMs": ISSUED_MS - i * DAY, "endMs": ISSUED_MS - i * DAY + 60_000, "durationS": 172_800,
+             "distanceM": 1_500_000} for i in range(62) for _ in range(2)]
+  write_drives(lb, drives)
+  write_own_totals(lb, ISSUED_MS - 1000, {"routes": 99999, "distanceMi": 999_999.99, "minutes": 9999999})
+  answer = lb.leaderboard_statement(ISSUED_MS)
+  payload = parts(answer["statement"])[1]
+  assert len(payload["days"]) == 62 and payload["commaStats"]["allTimeM"] == 1_609_343_984
+  assert len(answer["statement"]) < 16384 and verify(answer["statement"], X)
 
 
 # ---------------------------------------------------------------- The key
