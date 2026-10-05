@@ -743,7 +743,7 @@ std::string runtime_status_json() {
   // openpilot processes down now, and the last one the process watcher saw go down.
   out << "\"processEvents\":" << process_watch_status_json() << ",";
   // What this runtime can do for a paired phone without SSH.
-  out << "\"capabilities\":[\"runtime-update\",\"runtime-uninstall\",\"recording-records\",\"drive-retention\"],";
+  out << "\"capabilities\":[\"runtime-update\",\"runtime-uninstall\",\"reboot\",\"recording-records\",\"drive-retention\"],";
   out << "\"onroadUiExport\":" << live_onroad_ui_export_status_json(false) << ",";
   out << "\"persistedConfig\":" << commaview::runtime_debug::render_config_json(persisted, true) << ",";
   out << "\"effectiveConfig\":" << commaview::runtime_debug::render_config_json(effective, true) << ",";
@@ -883,7 +883,7 @@ std::string runtime_debug_apply_response() {
   out << "}";
   return out.str();
 }
-std::string read_param(const char* key) {
+std::string params_dir() {
   std::string root = kParamsDir;
 #if !defined(__aarch64__)
   // Host integration tests need an isolated params tree; device builds never
@@ -892,7 +892,11 @@ std::string read_param(const char* key) {
     if (*test_root) root = test_root;
   }
 #endif
-  return read_file_trimmed(root + "/" + key);
+  return root;
+}
+
+std::string read_param(const char* key) {
+  return read_file_trimmed(params_dir() + "/" + key);
 }
 
 bool is_onroad() {
@@ -2150,6 +2154,26 @@ commaview::api::HttpResponse runtime_uninstall_response() {
   return queue_runtime_job_response("uninstall", uninstaller, {}, "");
 }
 
+// POST /commaview/reboot: the paired phone's "Reboot comma now", for a patch that waits on a
+// reboot (onroadUiExport.uiReloadPending: openpilot can't reload its running UI). Never while
+// the car is being driven (409): offroad or parked only, like maintenance. It sets openpilot's
+// own DoReboot param, as openpilot's Reboot button does, so openpilot's manager stops its
+// processes cleanly and reboots the comma (HARDWARE.reboot) within a second or two; CommaView
+// never reboots the comma behind openpilot's back. 202 once asked; the app watches the comma
+// go away and come back.
+commaview::api::HttpResponse reboot_response() {
+  if (being_driven()) {
+    return make_json(409, "{\"ok\":false,\"roadPhase\":\"driving\",\"error\":\"the comma reboots only while the car is offroad, or in Park with openpilot disengaged\"}");
+  }
+  const std::string param = params_dir() + "/DoReboot";
+  const std::string tmp = param + ".commaview-tmp";
+  if (!write_file(tmp, "1", 0644) || rename(tmp.c_str(), param.c_str()) != 0) {
+    unlink(tmp.c_str());
+    return make_json(500, "{\"ok\":false,\"error\":\"could not ask openpilot to reboot\"}");
+  }
+  return make_json(202, "{\"ok\":true,\"rebooting\":true}");
+}
+
 constexpr const char* kUnauthorizedJson = "{\"ok\":false,\"error\":\"unauthorized\"}";
 
 std::string version_response_json() {
@@ -2312,6 +2336,14 @@ commaview::api::HttpResponse handle_post(const commaview::api::HttpRequest& req,
       return make_json(401, kUnauthorizedJson);
     }
     return runtime_uninstall_response();
+  }
+
+  if (req.path == "/commaview/reboot") {
+    // Restarts the whole comma: only a paired phone may ask.
+    if (api_token.empty() || !is_authorized(req, api_token)) {
+      return make_json(401, kUnauthorizedJson);
+    }
+    return reboot_response();
   }
 
   if (req.path == "/commaview/wifi/power-save") {
