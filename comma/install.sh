@@ -141,6 +141,9 @@ MARKER="# commaview-hook"
 BOOT_HOOK_CMD="/data/commaview/start.sh --before-openpilot"
 PARAMS_DIR="/data/params/d"
 FORCE_OFFROAD=0
+# --stage-only: download, verify and unpack the release and keep its road-phase beside the queue
+# (run_when_offroad.sh runs it for a queued update), then exit 75 without installing anything.
+STAGE_ONLY=0
 # Exit status of an install queued until openpilot is offroad (EX_TEMPFAIL).
 DEFERRED_EXIT=75
 DEFERRED_DIR="${COMMAVIEWD_DEFERRED_DIR:-/data/commaview-deferred}"
@@ -181,6 +184,8 @@ Options:
   --current                      Reinstall the installed release instead of looking one up.
   --force-offroad                While driving, queue the install to run once the car is parked or offroad
                                  (exit 75) instead of refusing it (exit 42). Never asks openpilot to go offroad.
+  --stage-only                   Only download, verify and unpack the release and keep its road-phase beside
+                                 the maintenance queue (exit 75); installs nothing, so it runs while driving.
   -h, --help                     Show this help and exit.
 
 Exits 43 without changing anything on a comma 3 (tici), which CommaView doesn't support.
@@ -210,6 +215,10 @@ while [ "$#" -gt 0 ]; do
       FORCE_OFFROAD=1
       shift
       ;;
+    --stage-only)
+      STAGE_ONLY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -221,6 +230,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Staging installs nothing: no stage report for the app (the queued job it stages for reports its own).
+if [ "$STAGE_ONLY" = "1" ]; then
+  PROGRESS_FILE=""
+fi
 
 error() {
   LAST_ERROR="$*"
@@ -326,13 +340,23 @@ read_is_onroad() {
 # queues without subscribing. A runtime without road-phase, or one that can't tell, leaves onroad
 # as driving.
 ROAD_PHASE_BIN="${COMMAVIEWD_ROAD_PHASE_BIN:-${INSTALL_DIR:-/data/commaview}/commaviewd}"
-# A first install has no runtime on the comma to ask. It asks the release it is installing: the
-# staged one once downloaded, or the copy a queued first install keeps here (the binary and its
-# lib/, which it finds through $ORIGIN/lib), which run_when_offroad.sh asks too.
+# The release being installed decides whether it may install, for an update as much as a first
+# install: its parked rules are the newest (an installed runtime that predates a rule, such as
+# "no car", would hold its own update back forever). So road-phase is asked of the staged release
+# once downloaded, else of the copy a queued install keeps here (the binary and its lib/, which it
+# finds through $ORIGIN/lib; run_when_offroad.sh asks it too), else of the installed runtime. Each
+# is the same read-only peek at openpilot's queues: no subscriber, no reader slot taken. The kit
+# names its release (tag), and only the install of that release asks it.
 ROAD_PHASE_KIT="${COMMAVIEWD_ROAD_PHASE_KIT:-$DEFERRED_DIR/road-phase}"
+road_phase_kit_bin() {
+  [ -x "$ROAD_PHASE_KIT/commaviewd" ] && [ -n "$RELEASE_TAG" ] && \
+    [ "$(tr -d '\r\n' < "$ROAD_PHASE_KIT/tag" 2>/dev/null)" = "$RELEASE_TAG" ] && \
+    printf '%s\n' "$ROAD_PHASE_KIT/commaviewd"
+}
+
 road_phase_bin() {
   local bin
-  for bin in "$ROAD_PHASE_BIN" "${STAGED_BUNDLE:+$STAGED_BUNDLE/commaviewd}" "$ROAD_PHASE_KIT/commaviewd"; do
+  for bin in "${STAGED_BUNDLE:+$STAGED_BUNDLE/commaviewd}" "$(road_phase_kit_bin || true)" "$ROAD_PHASE_BIN"; do
     if [ -n "$bin" ] && [ -x "$bin" ]; then
       printf '%s\n' "$bin"
       return 0
@@ -351,16 +375,17 @@ read_is_driving() {
   fi
 }
 
-# A queued first install keeps the release's road-phase beside the queue, so the queue (and the
-# queued install) can tell Park from driving before anything is installed. Best effort: without it
-# the job still runs once openpilot is offroad.
+# A queued install keeps the release's road-phase beside the queue (whether or not a runtime is
+# installed), so the queue and the queued install judge Park by the rules of the release about to
+# be installed. Best effort: without it the queue asks the installed runtime, and the job still
+# runs once openpilot is offroad.
 keep_road_phase_kit() {
   [ -n "$STAGED_BUNDLE" ] && [ -x "$STAGED_BUNDLE/commaviewd" ] || return 0
-  [ -x "$ROAD_PHASE_BIN" ] && return 0
   local tmp="$ROAD_PHASE_KIT.tmp.$$"
   rm -rf "$tmp"
   if mkdir -p "$tmp" && cp -a "$STAGED_BUNDLE/commaviewd" "$tmp/" && \
      { [ ! -d "$STAGED_BUNDLE/lib" ] || cp -a "$STAGED_BUNDLE/lib" "$tmp/"; } && \
+     printf '%s\n' "$RELEASE_TAG" > "$tmp/tag" && \
      rm -rf "$ROAD_PHASE_KIT" && mv "$tmp" "$ROAD_PHASE_KIT"; then
     return 0
   fi
@@ -579,6 +604,7 @@ handoff_to_release_installer() {
   cp -f "$next" "$copy" || { rm -f "$copy"; return 0; }
   local args=(--tag "$RELEASE_TAG")
   [ "$FORCE_OFFROAD" = "1" ] && args+=(--force-offroad)
+  [ "${STAGE_ONLY:-0}" = "1" ] && args+=(--stage-only)
   echo "Handing over to the ${RELEASE_TAG} installer"
   rm -rf "$tmpdir"
   trap - EXIT
@@ -601,10 +627,11 @@ ensure_offroad_ready() {
     cancel_deferred_maintenance
     return 0
   fi
-  # A first install can't tell Park from driving until the release is downloaded: download it
-  # (nothing on the comma changes), and the check after the download asks the release itself.
-  if [ -z "$STAGED_BUNDLE" ] && ! road_phase_bin >/dev/null; then
-    echo "The car is on and nothing is installed to tell Park from driving: checking again after the download."
+  # Before the download only the installed runtime (or nothing) has answered, and its parked rules
+  # may be older than the release's. Download, verify and stage it first (low priority; nothing on
+  # the comma changes), and the check after the download asks the release itself.
+  if [ -z "$STAGED_BUNDLE" ]; then
+    echo "The car reads as driving: checking again after the download, with the ${RELEASE_TAG} release's own Park check."
     return 0
   fi
 
@@ -891,21 +918,25 @@ trap 'LAST_FAILED_COMMAND="command failed (exit $?): $BASH_COMMAND"' ERR
 stage starting
 refresh_required_files install.sh
 handoff_to_release_installer
-refresh_required_files
-validate_required_files
+# Staging fetches none of the other companions: it installs nothing.
+if [ "$STAGE_ONLY" != "1" ]; then
+  refresh_required_files
+  validate_required_files
+fi
 
 echo "=== CommaView ${VERSION} Installer ==="
 echo "Release: ${RELEASE_TAG}"
 echo "Repo:    ${GITHUB_REPO}"
 
-ensure_offroad_ready
+# Staging changes nothing installed, so it runs whatever the car is doing.
+[ "$STAGE_ONLY" = "1" ] || ensure_offroad_ready
 
 if ! take_maint_lock "$MAINT_LOCK_WAIT_SEC"; then
   error "another CommaView install, uninstall or repair is running; try again when it has finished"
   exit 1
 fi
 
-mkdir -p "$INSTALL_DIR/logs" "$INSTALL_DIR/run" "$INSTALL_DIR/lib" "$INSTALL_DIR/api"
+[ "$STAGE_ONLY" = "1" ] || mkdir -p "$INSTALL_DIR/logs" "$INSTALL_DIR/run" "$INSTALL_DIR/lib" "$INSTALL_DIR/api"
 
 stage downloading "$RELEASE_TAG"
 echo "Downloading release assets..."
@@ -939,6 +970,18 @@ staged_kj_lib_count=$(find "$STAGED_BUNDLE/lib" -maxdepth 1 -type f -name 'libkj
 if [ "$staged_capnp_lib_count" -eq 0 ] || [ "$staged_kj_lib_count" -eq 0 ]; then
   error "bundle missing required runtime libs"
   exit 1
+fi
+
+# A queued update staged ahead of time: keep the release's road-phase beside the queue, so the queue
+# judges Park by this release's rules, and stop here. Nothing installed has changed.
+if [ "$STAGE_ONLY" = "1" ]; then
+  keep_road_phase_kit
+  if ! road_phase_kit_bin >/dev/null; then
+    error "could not keep the ${RELEASE_TAG} road-phase beside the queue"
+    exit 1
+  fi
+  echo "STAGED: CommaView ${RELEASE_TAG} is downloaded and verified; its own Park check decides when it installs."
+  exit "$DEFERRED_EXIT"
 fi
 
 # The car may have been driven off while this downloaded: check again right before anything

@@ -113,11 +113,28 @@ one replaces it) and runs it once openpilot's manager is up and either `IsOffroa
 driven when it starts (exit 42) waits again. `start.sh` resumes the waiter after a reboot.
 `/commaview/status` shows it as `deferredMaintenance`.
 
+An install or update is judged by the release being installed, not by the installed runtime: the
+newest release's parked rules decide whether it may install (a runtime from before `parked no-car`
+would otherwise hold its own update back on a bench comma forever). When the car reads as driving
+before the download, `install.sh` downloads, verifies and unpacks the release first (low priority;
+nothing installed changes) and asks the staged release's `road-phase` right before installing:
+parked, it installs now; driving, it exits 42, or with `--force-offroad` queues itself and keeps
+that release's `road-phase` (the binary, its `lib/` and its tag) in `/data/commaview-deferred/road-phase`.
+The queue asks that kept `road-phase` for an install of the same tag, else the installed runtime's.
+A queued update without one (the app's update below) is staged first: while the car reads as
+driving, the waiter runs the job's installer with `--stage-only` under the maintenance lock
+(download, verify, unpack, keep the `road-phase`, install nothing; exit 75), then asks the kept
+one. Either is the same read-only peek at openpilot's queues as the installed runtime's. The kept
+copy goes when the install succeeds or the queue is cancelled; queued uninstalls and repairs stage
+nothing. A comma whose installed runtime predates this (v0.0.56-alpha.11 and earlier) still gates
+the app's update on its installed `road-phase`, because its own queue runs it; there the way out is
+the SSH install (which runs the release's own installer) or openpilot offroad.
+
 A paired phone updates the runtime without SSH: `POST /commaview/runtime/update {"tag":"vX.Y.Z"}`
 (paired token required; `/commaview/status` lists `runtime-update` in `capabilities`) queues the
-installed `install.sh --tag vX.Y.Z` in that queue and answers 202. Once the car is parked or offroad
-the comma downloads the release from GitHub, checks its sha256, hands over to that release's own
-installer, and rolls back to the previous runtime if the new one's control API doesn't answer
+installed `install.sh --tag vX.Y.Z` in that queue and answers 202. The queue stages the release
+first (above), and once the car is parked (as that release reads it) or offroad the comma downloads
+the release, checks its sha256, hands over to that release's own installer, and rolls back to the previous runtime if the new one's control API doesn't answer
 within 30 s. `POST /commaview/runtime/uninstall` (paired token; `runtime-uninstall` in `capabilities`)
 queues the installed `uninstall.sh` the same way; it removes the API, its token and the queue with
 it.
@@ -149,6 +166,7 @@ the newest 30 segments for a minute's size, and keeps the listing for 5 minutes.
 | `--tag <release-tag>` | Install/update to a specific release tag. |
 | `--current` | Reinstall the currently installed release from `/data/commaview/version.env`. |
 | `--force-offroad` | While driving, queue the install until the car is parked or offroad (exit 75) instead of refusing it (exit 42). Never sets `OffroadMode`. |
+| `--stage-only` | Download, verify and unpack the release and keep its `road-phase` beside the maintenance queue, then exit 75 without installing anything (the queue runs it for a queued update). |
 | `-h`, `--help` | Print installer usage. |
 | `COMMAVIEWD_RELEASE_REPO` | Override release repo; default `RhynoTech/commaviewd`. |
 | `COMMAVIEWD_RELEASE_TAG` | Override resolved release tag. |
@@ -177,7 +195,7 @@ Installer safety behavior:
 | --- | --- | --- |
 | `comma/start.sh` | `bash /data/commaview/start.sh [--before-openpilot]` | Verifies/repairs the UI export patch when safe (offroad only), stops stale processes, then starts `commaviewd bridge` and `commaviewd control`. Never signals openpilot's UI. `--before-openpilot` is the boot hook: it first runs `apply_onroad_ui_export_patch.sh --before-openpilot` synchronously (bounded by `COMMAVIEWD_ONROAD_UI_EXPORT_PREPARE_TIMEOUT_SEC`, default 60), then starts the runtime in the background and returns so `continue.sh` can exec `launch_openpilot.sh`. Uses runtime env listed above. |
 | `comma/stop.sh` | `bash /data/commaview/stop.sh` | Stops pidfile-tracked bridge/control processes and cleans stray `/data/commaview/commaviewd` processes. No flags. |
-| `comma/scripts/run_when_offroad.sh` | `queue ACTION [--file PATH]... -- COMMAND...`, `resume`, `status`, `cancel` | The maintenance queue above. `COMMAVIEWD_DEFERRED_DIR`, `COMMAVIEWD_PARAMS_DIR`, `COMMAVIEWD_PROC_ROOT`, `COMMAVIEWD_DEFERRED_POLL_SEC` (10), `COMMAVIEWD_DEFERRED_OFFROAD_STABLE_SEC` (60), `COMMAVIEWD_DEFERRED_PARKED_STABLE_SEC` (20), `COMMAVIEWD_ROAD_PHASE_BIN` (`/data/commaview/commaviewd`) override its paths and timing (tests). |
+| `comma/scripts/run_when_offroad.sh` | `queue ACTION [--file PATH]... -- COMMAND...`, `resume`, `status`, `cancel` | The maintenance queue above. `COMMAVIEWD_DEFERRED_DIR`, `COMMAVIEWD_PARAMS_DIR`, `COMMAVIEWD_PROC_ROOT`, `COMMAVIEWD_DEFERRED_POLL_SEC` (10), `COMMAVIEWD_DEFERRED_OFFROAD_STABLE_SEC` (60), `COMMAVIEWD_DEFERRED_PARKED_STABLE_SEC` (20), `COMMAVIEWD_ROAD_PHASE_BIN` (`/data/commaview/commaviewd`), `COMMAVIEWD_ROAD_PHASE_KIT` (`<deferred dir>/road-phase`), `COMMAVIEWD_DEFERRED_STAGE_RETRY_SEC` (600) override its paths and timing (tests). |
 
 `start.sh` supervises bridge and control: one that crashes (a signal, or an error exit) is started
 again after 5 s, then 10, 20, ... up to 300 s, and given up on after 8 crashes in a row (a run of
