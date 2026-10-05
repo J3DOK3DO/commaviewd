@@ -52,6 +52,10 @@ rolling_log_line="$(grep -nF '{"runtime-run-events.jsonl"' "$CONTROL_CPP" | head
   echo "FAIL: support bundles must include bounded structured counters before capped rolling logs"
   exit 1
 }
+grep -Fq '"/commaview/reboot"' "$CONTROL_CPP" || { echo "FAIL: missing /commaview/reboot route"; exit 1; }
+# A reboot goes through openpilot's own DoReboot (its manager shuts down cleanly), never a raw reboot.
+grep -Fq '"/DoReboot"' "$CONTROL_CPP" || { echo "FAIL: reboot should set openpilot's DoReboot param"; exit 1; }
+! grep -Eq '"(/s?bin/|/usr/s?bin/)?reboot"' "$CONTROL_CPP" || { echo "FAIL: control mode must not reboot the comma itself"; exit 1; }
 grep -Fq "X-CommaView-Token" "$SERVER_CPP" || { echo "FAIL: missing auth token header handling"; exit 1; }
 ! grep -Fq "/tailscale/" "$CONTROL_CPP" || { echo "FAIL: control mode still exposes tailscale routes"; exit 1; }
 ! grep -Fq '"tailscale":' "$CONTROL_CPP" || { echo "FAIL: /commaview/status should not expose tailscale state anymore"; exit 1; }

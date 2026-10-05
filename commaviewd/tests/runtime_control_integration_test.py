@@ -6,7 +6,8 @@
 - /commaview/status reports roadPhase offroad / parked / driving from carState and selfdriveState
   read without subscribing, next to the unchanged roadState;
 - a Safe Repair asked for while onroad is queued until openpilot is offroad (202, deferred), never
-  forced, and the queue shows in /commaview/status.
+  forced, and the queue shows in /commaview/status;
+- a reboot is asked of openpilot (DoReboot) only offroad or parked, never while driving.
 """
 
 import json
@@ -146,7 +147,7 @@ def main():
             code, status = request(port, "/commaview/status")
             assert status["roadState"] == "offroad" and status["roadPhase"] == "offroad", status
             assert status["deferredMaintenance"] == {"state": "none"}, status
-            assert {"runtime-update", "runtime-uninstall"} <= set(status["capabilities"]), status
+            assert {"runtime-update", "runtime-uninstall", "reboot"} <= set(status["capabilities"]), status
             assert road_phase_cli() == (0, "offroad offroad")
             (params / "IsOffroad").write_text("0")
             code, status = request(port, "/commaview/status")
@@ -167,6 +168,10 @@ def main():
                 # Parked is not driving: a repair runs now (here the helper is missing), not queued.
                 code, body = request(port, "/commaview/onroad-ui-export/repair", "POST", {"forceOffroad": True})
                 assert code != 202 and body["status"]["state"] != "deferred-until-offroad", (code, body)
+                # Parked may reboot, like maintenance.
+                code, body = request(port, "/commaview/reboot", "POST", {})
+                assert code == 202 and body["rebooting"], (code, body)
+                (params / "DoReboot").unlink()
                 assert phase("park", "1", "0", "2000")["roadPhaseReason"] == "car-state-stale"
                 assert road_phase_cli()[0] == 1
                 print("PASS: /commaview/status and commaviewd road-phase report offroad / parked / driving")
@@ -210,6 +215,22 @@ def main():
             code, body = request(port, "/commaview/onroad-ui-export/repair", "POST", {})
             assert body["status"]["state"] == "onroad-blocked", body
             print("PASS: Safe Repair while driving is queued until parked, never forced")
+
+            # --- reboot: openpilot's own DoReboot, never while driving ----------------------
+            # Still onroad with the car-state queue stale: driving.
+            code, body = request(port, "/commaview/reboot", "POST", {}, token="wrong")
+            assert code == 401, (code, body)
+            code, body = request(port, "/commaview/reboot", "POST", {})
+            assert code == 409 and body["ok"] is False and body["roadPhase"] == "driving", (code, body)
+            assert not (params / "DoReboot").exists(), "no reboot while driving"
+            (params / "IsOffroad").write_text("1")
+            code, body = request(port, "/commaview/reboot", "POST", {})
+            assert code == 202 and body["ok"] and body["rebooting"], (code, body)
+            assert (params / "DoReboot").read_text() == "1"
+            assert not list(params.glob("DoReboot.*")), list(params.iterdir())
+            (params / "DoReboot").unlink()
+            (params / "IsOffroad").write_text("0")
+            print("PASS: /commaview/reboot sets openpilot's DoReboot offroad or parked, never while driving, paired phone only")
 
             # --- runtime update without SSH ------------------------------------------------
             code, body = request(port, "/commaview/runtime/update", "POST", {"tag": "v0.0.57-alpha.1"}, token="wrong")
