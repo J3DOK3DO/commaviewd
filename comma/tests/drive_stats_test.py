@@ -21,6 +21,7 @@ def stats(tmp_path, monkeypatch):
   spec.loader.exec_module(module)
   monkeypatch.setattr(module, "DRIVES_FILE", str(tmp_path / "data" / "drives.json"))
   monkeypatch.setattr(module, "STATS_FILE", str(tmp_path / "data" / "drive-stats.json"))
+  monkeypatch.setattr(module, "COMMA_API_FILE", str(tmp_path / "data" / "comma-api-stats.json"))
   monkeypatch.setattr(module, "LOCATION_CONFIG_FILE", str(tmp_path / "config" / "location.json"))
   monkeypatch.setattr(module, "LOCATION_LAST_FILE", str(tmp_path / "data" / "location-last.json"))
   monkeypatch.setattr(module, "LOCATION_LOG_FILE", str(tmp_path / "live" / "location-log.json"))
@@ -185,17 +186,25 @@ def test_sunnypilots_fresh_cache_is_read_instead_of_asking_comma(stats):
   saved_s = NOW / 1000 - 600
   os.utime(cache_path, (saved_s, saved_s))
 
+  # The runtime's own figure (the leaderboard's) is under 6 hours old: comma isn't asked.
+  stats.write_json_atomic(stats.COMMA_API_FILE, {"version": 1, "source": "comma-api", "fetchedAtMs": NOW - 3_600_000,
+                                                 "all": TOTALS["all"]})
+
   def fetch():
-    raise AssertionError("asked comma although sunnypilot's copy is fresh")
+    raise AssertionError("asked comma although sunnypilot's copy and the runtime's own are fresh")
 
   saved = stats.refresh_totals(NOW, fetch=fetch)
   assert saved["source"] == "sunnypilot" and saved["fetchedAtMs"] == NOW - 600_000
   assert saved["all"] == {"routes": 9, "distanceMi": 12.5, "minutes": 30}
+  # Kept apart: sunnypilot's copy never becomes the runtime's own figure.
+  assert json.loads(Path(stats.COMMA_API_FILE).read_text())["all"] == TOTALS["all"]
 
 
 def test_totals_come_from_comma_and_survive_a_failed_refresh(stats):
   saved = stats.refresh_totals(NOW, fetch=lambda: TOTALS, cache=lambda: None)
   assert saved == {"version": 1, "source": "comma", "fetchedAtMs": NOW, **TOTALS}
+  assert json.loads(Path(stats.COMMA_API_FILE).read_text()) == \
+    {"version": 1, "source": "comma-api", "fetchedAtMs": NOW, "all": TOTALS["all"]}
 
   def offline():
     raise RuntimeError("offline")

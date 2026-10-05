@@ -53,13 +53,22 @@ if grep -nE '"leaderboard-(register|statement)"' "$SCRIPT" | grep -vE 'add_parse
   fail "the script signs only for its leaderboard modes"
 fi
 
-# A statement is signed again only when what it's made from changed: the drive list or the key,
-# checked with stat() before the script runs. The last one is kept owner-only beside the counter.
+# A statement is signed again only when what it's made from changed: the drive list, the comma
+# totals (data/comma-api-stats.json, its commaStats) or the key, checked with stat() before the
+# script runs. The last one is kept owner-only beside the counter.
 stmt_block="$(sed -n '/^commaview::api::HttpResponse leaderboard_statement_response() {/,/^}/p' "$CONTROL")"
 [[ -n "$stmt_block" ]] || fail "leaderboard_statement_response() not found"
 require_literal 'kLeaderboardStatementCacheFile = "data/leaderboard-statement.json"' "$CONTROL"
 require_literal 'kLeaderboardDriveListFile = "data/drives.json"' "$CONTROL"
-require_literal '{kLeaderboardDriveListFile, kLeaderboardKeyFile}' "$CONTROL"
+require_literal 'kLeaderboardCommaTotalsFile = "data/comma-api-stats.json"' "$CONTROL"
+require_literal '{kLeaderboardDriveListFile, kLeaderboardCommaTotalsFile, kLeaderboardKeyFile}' "$CONTROL"
+require_literal 'COMMA_API_FILE = os.path.join(ROOT, "data", "comma-api-stats.json")' "$SCRIPT"
+# commaStats come only from the runtime's own request to comma, never sunnypilot's ApiCache_DriveStats.
+cs_block="$(sed -n '/^def comma_stats(/,/^def /p' "$SCRIPT")"
+grep -Fq 'read_json(COMMA_API_FILE)' <<<"$cs_block" || fail "commaStats must be read from the runtime's own file"
+if grep -nE 'cached_totals\(|read_json\(STATS_FILE\)|PARAMS_DIR' <<<"$cs_block"; then
+  fail "commaStats must never come from sunnypilot's cache"
+fi
 grep -Fq 'leaderboard_cached_statement(inputs)' <<<"$stmt_block" || fail "statements must check the cache first"
 grep -Fq 'chmod(cache_path.c_str(), 0600)' <<<"$stmt_block" || fail "the cached statement must be owner-only"
 cached_at="$(grep -n 'leaderboard_cached_statement(inputs)' <<<"$stmt_block" | cut -d: -f1)"

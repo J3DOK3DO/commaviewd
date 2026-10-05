@@ -1757,14 +1757,18 @@ std::string location_set_response(const std::string& body) {
 // to be redacted from support bundles.
 //
 // Phones ask for a statement whenever they reach the comma (at most every 15 minutes each), driving
-// or not. While the drive list and the key are as they were, the last statement is handed back
-// unchanged from data/leaderboard-statement.json (0600, beside the counter), checked with two stat()
+// or not. While the drive list, the runtime's own comma totals (data/comma-api-stats.json, whose
+// all-time distance the statement carries as commaStats) and the key are as they were, the last statement is handed back
+// unchanged from data/leaderboard-statement.json (0600, beside the counter), checked with three stat()
 // calls: no Python, no new seq. The account service answers the same statement again as a duplicate,
 // a success. The drive list only changes when a drive has ended (the after-drive script), so a
-// statement never covers a drive in progress, and a day's total in it never goes down.
+// statement never covers a drive in progress, and a day's total in it never goes down. The comma
+// totals change only when the totals script's own request to comma answers (at most every 6 hours
+// while sunnypilot's cached copy is fresh).
 
 constexpr const char* kLeaderboardKeyFile = "data/leaderboard-key.json";
 constexpr const char* kLeaderboardDriveListFile = "data/drives.json";
+constexpr const char* kLeaderboardCommaTotalsFile = "data/comma-api-stats.json";
 constexpr const char* kLeaderboardStatementCacheFile = "data/leaderboard-statement.json";
 constexpr int kLeaderboardScriptTimeoutSec = 20;
 // The script's exit codes (commaview_drive_stats.py, EXIT_*).
@@ -1801,12 +1805,13 @@ bool leaderboard_answer_ok(const std::string& answer) {
   return answer.rfind("{\"ok\":true,", 0) == 0 && answer.back() == '}' && answer.find('\n') == std::string::npos;
 }
 
-// What a statement is made from, cheaply: the drive list's and the key's size, modification time and
-// inode (both are replaced whole when they change), or "none" for one that's missing.
+// What a statement is made from, cheaply: the drive list's, the comma totals' and the key's size,
+// modification time and inode (each is replaced whole when it changes), or "none" for one that's
+// missing.
 std::string leaderboard_statement_inputs() {
   std::ostringstream out;
-  out << "v1";
-  for (const char* relative : {kLeaderboardDriveListFile, kLeaderboardKeyFile}) {
+  out << "v2";
+  for (const char* relative : {kLeaderboardDriveListFile, kLeaderboardCommaTotalsFile, kLeaderboardKeyFile}) {
     struct stat st {};
     if (stat(drivelog_path(relative).c_str(), &st) != 0) {
       out << " none";
@@ -1869,7 +1874,8 @@ commaview::api::HttpResponse leaderboard_register_response(const std::string& bo
 }
 
 // POST /commaview/leaderboard/statement {} -> {ok, statement, keyId, seq}: the last one again while
-// the drive list and the key haven't changed, else a new one (and that one kept for next time).
+// the drive list, the comma totals and the key haven't changed, else a new one (and that one kept for
+// next time).
 commaview::api::HttpResponse leaderboard_statement_response() {
   std::lock_guard<std::mutex> lk(g_leaderboard_mutex);
   // Taken before signing: a drive list that changes meanwhile makes the next request sign again.
