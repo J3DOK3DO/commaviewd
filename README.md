@@ -72,7 +72,7 @@ curl -fsSL https://commaview.com/commaviewd/install.sh \
   | ssh comma@<comma-ip> bash
 ```
 
-Without `--tag`, the installer installs the runtime paired with the current CommaView app release, from `https://commaview.com/api/current-release`. A runtime that's tagged but not yet paired with an app release isn't installed this way. If that lookup fails, the installer falls back to the newest GitHub release.
+Without `--tag`, the installer installs the compatible public default runtime, from `https://commaview.com/api/current-release`. Creating a tag alone does not change this default; beta promotion is explicit. If that lookup fails, the installer falls back to the newest GitHub release.
 
 Releases are published at `https://commaview.com/commaviewd/<tag>/` (the tarball, its `.sha256` and the installer's `comma/` scripts; `commaviewd-release` uploads them to the public `commaview-runtime-releases` bucket, which commaview.com serves), and installs and updates fetch them there rather than from GitHub. `https://commaview.com/commaviewd/install.sh` is the installer shim: it runs the asked-for release's installer.
 
@@ -389,3 +389,27 @@ A canary failing is information: upstream changed an interface commaviewd uses.
 
 - Read `DISCLAIMER.md` before use.
 - License: `LICENSE` (All Rights Reserved).
+
+### Release a runtime without releasing an APK
+
+After the account service's runtime registry and the app's discovery support have shipped once,
+run `commaviewd-release` on main with `channel=alpha` (or `beta`), `offer_updates=true`, and explicit
+inclusive `min_app_version` and `max_app_version`. Leave `promote_current=false` for a runtime-only
+rollout. The workflow validates the bounds before cutting a tag, verifies and publishes the
+bundle, then registers its tag, bounds and checksum in production and staging account services.
+No APK is built, registered or versioned by this workflow.
+
+An eligible alpha APK can discover alpha runtimes and final betas; beta APKs discover only beta
+runtimes. The newest compatible runtime wins, including an older runtime when a newer one needs
+a newer APK. Registration is immutable and safe to retry. `offer_updates=false` publishes assets
+only, without advertising an update. A tag-push release also publishes assets only.
+
+`promote_current=true` is a separate beta-only option for the public installer's default. It
+requires the runtime to support the public APK in both account environments and refuses runtime
+downgrades. It preserves APK release fields. Alpha registration never changes the public default.
+
+For an existing hosted tag, run `runtime-rollout` with the tag and app version bounds: it registers
+the existing immutable files without rebuilding the runtime or releasing an APK. Use
+`environment=staging` to verify the deployed account API before promoting it to production;
+`environment=all` registers in both services. Deploy the account changes before registering in
+that environment.

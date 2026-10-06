@@ -29,8 +29,23 @@ on:
         required: false
         default: false
         type: boolean
+      offer_updates:
+        description: 'Register this runtime for compatible installed apps after publishing; requires both app version bounds'
+        required: false
+        default: true
+        type: boolean
+      min_app_version:
+        description: 'Oldest compatible APK version, e.g. 0.0.161-alpha.1 (inclusive)'
+        required: false
+        default: ''
+        type: string
+      max_app_version:
+        description: 'Newest compatible APK version, e.g. 0.0.161-beta (inclusive)'
+        required: false
+        default: ''
+        type: string
       promote_current:
-        description: 'Promote this runtime tag to the current release after publishing assets'
+        description: 'Beta only: also promote the compatible public installer runtime (leaves APK release unchanged)'
         required: false
         default: false
         type: boolean
@@ -41,7 +56,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: commaviewd-release-${{ github.ref }}
+  # Serialize cuts and existing-bundle rollouts before either can promote the public default.
+  group: commaviewd-runtime-publication
   cancel-in-progress: false
 
 env:
@@ -60,11 +76,34 @@ jobs:
       # and the tag is created here. Tags made with the workflow's token start no other workflow,
       # so this run does the release itself.
       - name: Check out main to cut a release
-        if: github.event_name == 'workflow_dispatch' && inputs.tag == ''
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+
+      - name: Validate runtime rollout before cutting a tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OFFER_UPDATES: ${{ inputs.offer_updates }}
+          PROMOTE_CURRENT: ${{ inputs.promote_current }}
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$PROMOTE_CURRENT" == true && "$OFFER_UPDATES" != true ]]; then
+            echo "promote_current requires offer_updates" >&2
+            exit 1
+          fi
+          if [[ "$OFFER_UPDATES" == true ]]; then
+            TAG="${REQUESTED_TAG:-v0.0.0-${CHANNEL}}"
+            args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
+              --sha256 "$(printf '%064d' 0)" --validate-only)
+            [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
+            node scripts/publish-current-release.mjs "${args[@]}"
+          fi
 
       - name: Cut release tag
         id: cut
@@ -284,18 +323,22 @@ jobs:
 
 
       - name: Checkout release control-plane scripts
-        if: github.event_name == 'workflow_dispatch' && inputs.promote_current == true
+        if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: release-control
 
-      - name: Promote current runtime release
-        if: github.event_name == 'workflow_dispatch' && inputs.promote_current == true
+      - name: Register independent runtime release
+        if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
           RELEASE_ACCOUNT: commaview-release@commaview.iam.gserviceaccount.com
-          # The account services' /api/current-release (RhynoTech/commaview-web, account/):
+          # Register runtime offers in both account services, independently of APK releases.
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+          PROMOTE_CURRENT: ${{ inputs.promote_current }}
+          # Account services (RhynoTech/commaview-web, account/):
           # production (commaview.com/api/current-release) first, then staging.
           # Each service's public address (the ID token's audience) | its Cloud Run address, which
           # CI calls directly: Cloudflare's bot challenge stops GitHub's runners at the public one.
@@ -305,6 +348,8 @@ jobs:
         run: |
           set -euo pipefail
           TAG='${{ steps.vars.outputs.tag }}'
-          node release-control/scripts/publish-current-release.mjs \
-            --runtime-tag "$TAG" \
-            --publish-url "$ACCOUNT_SERVICE_URLS"
+          SHA256="$(cut -d ' ' -f1 "release/${TAG}/commaview-comma-${TAG}.tar.gz.sha256")"
+          args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
+            --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS")
+          [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
+          node release-control/scripts/publish-current-release.mjs "${args[@]}"
