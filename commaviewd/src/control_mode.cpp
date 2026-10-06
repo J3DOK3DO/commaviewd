@@ -1696,18 +1696,22 @@ std::string drive_stats_response_json() {
   return out.str();
 }
 
-// While driving: sunnypilot's current position, else the comma's own newest GPS fix read from
-// openpilot's msgq ring without subscribing. If neither answers (say msgq's layout changed), the
-// position at the end of the drive's last finished log minute, asked for about once a minute.
+// Prefer the comma's own GPS: its timestamp is acquisition time and it includes accuracy.
+// Sunnypilot can rewrite LastGPSPosition with cached coordinates after localization fails;
+// its file mtime proves only when it was saved, so never let it mask a timestamped GPS fix.
+// The saved/log fallbacks remain labelled for consumers that can display cached positions.
 std::string live_location_json() {
-  const std::string sunnypilot = sunnypilot_position_json(memory_params_dir() + "/LastGPSPosition", kLivePositionMaxAgeSec);
-  if (sunnypilot != "null") return sunnypilot;
   {
     std::lock_guard<std::mutex> lk(g_drive_mutex);
     if (auto fix = gps_peek_locked().latest()) {
       const int64_t age_ms = wall_ms_now() - fix->fix_ms;
       if (age_ms >= -5000 && age_ms <= static_cast<int64_t>(kLivePositionMaxAgeSec) * 1000) return comma_fix_json(*fix);
     }
+  }
+  const std::string sunnypilot = sunnypilot_position_json(memory_params_dir() + "/LastGPSPosition", kLivePositionMaxAgeSec);
+  if (sunnypilot != "null") return sunnypilot;
+  {
+    std::lock_guard<std::mutex> lk(g_drive_mutex);
     const auto now = SteadyClock::now();
     if (g_drive.driving && !g_drive.route.empty() &&
         (g_drive.last_position_run.time_since_epoch().count() == 0 ||
