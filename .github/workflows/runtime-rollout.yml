@@ -1,0 +1,90 @@
+name: runtime-rollout
+
+# Register an existing immutable bundle without rebuilding it or cutting an APK release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing hosted runtime tag, e.g. v0.0.57-alpha.2'
+        required: true
+        type: string
+      min_app_version:
+        description: 'Oldest compatible APK version (inclusive)'
+        required: true
+        type: string
+      max_app_version:
+        description: 'Newest compatible APK version (inclusive)'
+        required: true
+        type: string
+      promote_current:
+        description: 'Beta only: also promote the compatible public installer default'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: runtime-rollout
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  register:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Validate existing runtime and compatibility
+        id: release
+        env:
+          TAG: ${{ inputs.tag }}
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+          PROMOTE_CURRENT: ${{ inputs.promote_current }}
+        run: |
+          set -euo pipefail
+          args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
+            --sha256 "$(printf '%064d' 0)" --validate-only)
+          [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
+          node scripts/publish-current-release.mjs "${args[@]}"
+          BASE="https://storage.googleapis.com/commaview-runtime-releases/${TAG}/commaview-comma-${TAG}.tar.gz"
+          curl -fsS --max-time 30 "$BASE.sha256" -o "$RUNNER_TEMP/runtime.sha256"
+          curl -fsSI --max-time 30 "$BASE" > /dev/null
+          SHA256="$(cut -d ' ' -f1 "$RUNNER_TEMP/runtime.sha256")"
+          [[ "$SHA256" =~ ^[a-f0-9]{64}$ ]] || { echo 'Invalid hosted checksum' >&2; exit 1; }
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to Google Cloud (release account)
+        id: gcp
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/263004041190/locations/global/workloadIdentityPools/commaview-github/providers/commaview-releases
+          service_account: commaview-release@commaview.iam.gserviceaccount.com
+          token_format: access_token
+
+      - name: Register runtime without an APK release
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          RELEASE_ACCOUNT: commaview-release@commaview.iam.gserviceaccount.com
+          TAG: ${{ inputs.tag }}
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+          PROMOTE_CURRENT: ${{ inputs.promote_current }}
+          SHA256: ${{ steps.release.outputs.sha256 }}
+          ACCOUNT_SERVICE_URLS: >-
+            https://my.commaview.com|https://commaview-account-xpdgughraq-uk.a.run.app,
+            https://my-staging.commaview.com|https://commaview-account-staging-xpdgughraq-uk.a.run.app
+        run: |
+          set -euo pipefail
+          args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
+            --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS")
+          [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
+          node scripts/publish-current-release.mjs "${args[@]}"
