@@ -405,6 +405,8 @@ def test_apply_patch_script_refuses_implicit_destructive_repair_and_backs_up_for
     assert 'cp -a "$backup_root"/. "$OP_ROOT"/ 2>/dev/null || true' not in text
     assert 'remote_flavor()' in text
     assert 'github.com:commaai/openpilot' in text
+    assert 'github.com:J3DOK3DO/openpilot' in text
+    assert 'github.com:firestar5683/StarPilot' in text
     assert 'github.com:sunnypilot/sunnypilot' in text
     assert 'github.com:sunnypilot/openpilot' in text
     assert 'selfdrive/ui/mici' in text

@@ -220,10 +220,11 @@ mapfile -t AUGMENTED_ROAD_PATHS < <(augmented_paths_for_platform "${ui_platform:
 
 remote_flavor() {
   local remote="$1"
-  remote="${remote%.git}"
   remote="${remote%/}"
+  remote="${remote%.git}"
   case "$remote" in
     *github.com:commaai/openpilot|*github.com/commaai/openpilot) printf '%s\n' openpilot ;;
+    https://github.com/J3DOK3DO/openpilot|git@github.com:J3DOK3DO/openpilot|ssh://git@github.com/J3DOK3DO/openpilot|https://github.com/firestar5683/StarPilot|git@github.com:firestar5683/StarPilot|ssh://git@github.com/firestar5683/StarPilot) printf '%s\n' openpilot ;;
     *github.com:sunnypilot/sunnypilot|*github.com/sunnypilot/sunnypilot|*github.com:sunnypilot/openpilot|*github.com/sunnypilot/openpilot) printf '%s\n' sunnypilot ;;
     *) return 1 ;;
   esac
@@ -409,7 +410,7 @@ elif ! git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 elif [ -z "$ui_platform" ]; then
   state="unknown-platform"; reason="unable to determine UI platform for $OP_ROOT; pass --platform mici or --platform tizi"
 elif [ "$flavor_detected" -ne 1 ]; then
-  state="unknown-flavor"; reason="unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot and sunnypilot remotes"
+  state="unknown-flavor"; reason="unsupported upstream remote for $OP_ROOT; CommaView currently supports commaai/openpilot, sunnypilot, and validated StarPilot remotes"
 elif [ ! -f "$template_path" ]; then
   state="missing-template"; reason="missing socket UI export helper template for $flavor"
 elif [ ! -f "$TRANSFORMER" ]; then
