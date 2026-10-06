@@ -56,7 +56,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: commaviewd-release-${{ github.ref }}
+  # Serialize cuts and existing-bundle rollouts before either can promote the public default.
+  group: commaviewd-runtime-publication
   cancel-in-progress: false
 
 env:

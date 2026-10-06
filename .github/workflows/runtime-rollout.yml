@@ -36,7 +36,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: runtime-rollout
+  # Share the release workflow's publication lock so promotion preflight cannot race another cut.
+  group: commaviewd-runtime-publication
   cancel-in-progress: false
 
 env:
