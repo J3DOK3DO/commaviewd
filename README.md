@@ -409,5 +409,7 @@ requires the runtime to support the public APK in both account environments and 
 downgrades. It preserves APK release fields. Alpha registration never changes the public default.
 
 For an existing hosted tag, run `runtime-rollout` with the tag and app version bounds: it registers
-the existing immutable files without rebuilding the runtime or releasing an APK. Deploy the
-account changes through staging and production before using either workflow's registration.
+the existing immutable files without rebuilding the runtime or releasing an APK. Use
+`environment=staging` to verify the deployed account API before promoting it to production;
+`environment=all` registers in both services. Deploy the account changes before registering in
+that environment.

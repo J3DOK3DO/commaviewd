@@ -16,6 +16,15 @@ on:
         description: 'Newest compatible APK version (inclusive)'
         required: true
         type: string
+      environment:
+        description: 'Account environment to register in (staging supports verification before production deployment)'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - staging
+          - production
       promote_current:
         description: 'Beta only: also promote the compatible public installer default'
         required: false
@@ -79,11 +88,17 @@ jobs:
           MAX_APP_VERSION: ${{ inputs.max_app_version }}
           PROMOTE_CURRENT: ${{ inputs.promote_current }}
           SHA256: ${{ steps.release.outputs.sha256 }}
-          ACCOUNT_SERVICE_URLS: >-
-            https://my.commaview.com|https://commaview-account-xpdgughraq-uk.a.run.app,
-            https://my-staging.commaview.com|https://commaview-account-staging-xpdgughraq-uk.a.run.app
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          PRODUCTION_SERVICE: https://my.commaview.com|https://commaview-account-xpdgughraq-uk.a.run.app
+          STAGING_SERVICE: https://my-staging.commaview.com|https://commaview-account-staging-xpdgughraq-uk.a.run.app
         run: |
           set -euo pipefail
+          case "$TARGET_ENVIRONMENT" in
+            staging) ACCOUNT_SERVICE_URLS="$STAGING_SERVICE" ;;
+            production) ACCOUNT_SERVICE_URLS="$PRODUCTION_SERVICE" ;;
+            all) ACCOUNT_SERVICE_URLS="$PRODUCTION_SERVICE,$STAGING_SERVICE" ;;
+            *) echo 'Choose all, staging, or production' >&2; exit 1 ;;
+          esac
           args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
             --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS")
           [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
