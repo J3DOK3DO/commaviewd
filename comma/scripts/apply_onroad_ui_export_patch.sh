@@ -596,10 +596,11 @@ write_patch_state_env() {
 
 remote_flavor() {
   local remote="$1"
-  remote="${remote%.git}"
   remote="${remote%/}"
+  remote="${remote%.git}"
   case "$remote" in
     *github.com:commaai/openpilot|*github.com/commaai/openpilot) printf '%s\n' openpilot ;;
+    https://github.com/J3DOK3DO/openpilot|git@github.com:J3DOK3DO/openpilot|ssh://git@github.com/J3DOK3DO/openpilot|https://github.com/firestar5683/StarPilot|git@github.com:firestar5683/StarPilot|ssh://git@github.com/firestar5683/StarPilot) printf '%s\n' openpilot ;;
     *github.com:sunnypilot/sunnypilot|*github.com/sunnypilot/sunnypilot|*github.com:sunnypilot/openpilot|*github.com/sunnypilot/openpilot) printf '%s\n' sunnypilot ;;
     *) return 1 ;;
   esac
@@ -630,7 +631,7 @@ detect_flavor() {
 }
 
 flavor="$(detect_flavor)" || {
-  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot and sunnypilot remotes" >&2
+  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports commaai/openpilot, sunnypilot, and validated StarPilot remotes" >&2
   exit 1
 }
 ui_platform="$(detect_ui_platform "$REQUESTED_UI_PLATFORM")" || {
