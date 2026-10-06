@@ -594,6 +594,26 @@ write_patch_state_env() {
     "$flavor" "$ui_platform" "$fingerprint" "$OP_ROOT" "$current_upstream_head" "$current_upstream_remote" > "$STATE_ENV"
 }
 
+VALIDATED_STARPILOT_C612_HEAD="7b4db9a26010ba9899eef242d3ca49b33cbcca9c"
+VALIDATED_STARPILOT_C612_TREE="b4fb93496a26c996a4763a72fa16415b7a1a4012"
+
+validated_local_starpilot_flavor() {
+  local remote="$1"
+  local current_head=""
+  local current_tree=""
+  remote="${remote%/}"
+  case "$remote" in
+    "$OP_ROOT"|file://"$OP_ROOT")
+      current_head="$(git -C "$OP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+      current_tree="$(git -C "$OP_ROOT" rev-parse "HEAD^{tree}" 2>/dev/null || true)"
+      [ "$current_head" = "$VALIDATED_STARPILOT_C612_HEAD" ] || return 1
+      [ "$current_tree" = "$VALIDATED_STARPILOT_C612_TREE" ] || return 1
+      printf '%s\n' openpilot
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 remote_flavor() {
   local remote="$1"
   remote="${remote%/}"
@@ -614,7 +634,7 @@ detect_flavor() {
 
   remote="$(git -C "$OP_ROOT" remote get-url origin 2>/dev/null || true)"
   if [ -n "$remote" ]; then
-    preferred="$(remote_flavor "$remote")" || return 1
+    preferred="$(remote_flavor "$remote")" || preferred="$(validated_local_starpilot_flavor "$remote")" || return 1
   else
     state_flavor="$(state_value ONROAD_UI_EXPORT_FLAVOR || true)"
     state_op_root="$(state_value ONROAD_UI_EXPORT_OP_ROOT || true)"
@@ -631,7 +651,7 @@ detect_flavor() {
 }
 
 flavor="$(detect_flavor)" || {
-  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports commaai/openpilot, sunnypilot, and validated StarPilot remotes" >&2
+  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports commaai/openpilot, sunnypilot, and validated StarPilot remotes/checkouts" >&2
   exit 1
 }
 ui_platform="$(detect_ui_platform "$REQUESTED_UI_PLATFORM")" || {

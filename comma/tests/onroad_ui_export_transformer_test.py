@@ -1478,7 +1478,7 @@ def test_apply_script_rejects_unsupported_upstream_fork_even_with_state_flavor(t
 
     assert result.returncode == 1
     assert "unsupported upstream remote" in result.stderr
-    assert "validated StarPilot remotes" in result.stderr
+    assert "validated StarPilot remotes/checkouts" in result.stderr
 
 
 def test_verify_script_rejects_unsupported_upstream_fork_even_with_state_flavor(tmp_path):
@@ -1491,7 +1491,7 @@ def test_verify_script_rejects_unsupported_upstream_fork_even_with_state_flavor(
 
     assert result.returncode == 1
     assert "unsupported upstream remote" in result.stdout
-    assert "validated StarPilot remotes" in result.stdout
+    assert "validated StarPilot remotes/checkouts" in result.stdout
 
 
 def test_verify_script_fails_when_existing_flat_augmented_road_target_is_stale(tmp_path):
@@ -1620,3 +1620,34 @@ def test_apply_and_verify_accept_all_validated_starpilot_remote_forms(tmp_path, 
     status = json.loads(verified.stdout)
     assert status["patchVerified"] is True
     assert status["flavor"] == "openpilot"
+
+
+def test_apply_rejects_unvalidated_local_self_origin(tmp_path):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", str(op_root)], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root)
+
+    assert result.returncode == 1
+    assert "unsupported upstream remote" in result.stderr
+    assert "validated StarPilot remotes/checkouts" in result.stderr
+
+
+def test_verify_rejects_unvalidated_local_self_origin(tmp_path):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", f"file://{op_root}"], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+
+    result = run_lifecycle_script(
+        REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh",
+        install_dir,
+        op_root,
+        "--json",
+    )
+
+    assert result.returncode == 1
+    assert "unsupported upstream remote" in result.stdout
+    assert "validated StarPilot remotes/checkouts" in result.stdout

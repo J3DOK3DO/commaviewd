@@ -218,6 +218,26 @@ detect_ui_prefix
 ui_platform="$(detect_ui_platform "$REQUESTED_UI_PLATFORM")" || ui_platform=""
 mapfile -t AUGMENTED_ROAD_PATHS < <(augmented_paths_for_platform "${ui_platform:-auto}" || true)
 
+VALIDATED_STARPILOT_C612_HEAD="7b4db9a26010ba9899eef242d3ca49b33cbcca9c"
+VALIDATED_STARPILOT_C612_TREE="b4fb93496a26c996a4763a72fa16415b7a1a4012"
+
+validated_local_starpilot_flavor() {
+  local remote="$1"
+  local current_head=""
+  local current_tree=""
+  remote="${remote%/}"
+  case "$remote" in
+    "$OP_ROOT"|file://"$OP_ROOT")
+      current_head="$(git -C "$OP_ROOT" rev-parse HEAD 2>/dev/null || true)"
+      current_tree="$(git -C "$OP_ROOT" rev-parse "HEAD^{tree}" 2>/dev/null || true)"
+      [ "$current_head" = "$VALIDATED_STARPILOT_C612_HEAD" ] || return 1
+      [ "$current_tree" = "$VALIDATED_STARPILOT_C612_TREE" ] || return 1
+      printf '%s\n' openpilot
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 remote_flavor() {
   local remote="$1"
   remote="${remote%/}"
@@ -239,7 +259,7 @@ detect_flavor() {
   if git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     remote="$(git -C "$OP_ROOT" remote get-url origin 2>/dev/null || true)"
     if [ -n "$remote" ]; then
-      preferred="$(remote_flavor "$remote")" || return 1
+      preferred="$(remote_flavor "$remote")" || preferred="$(validated_local_starpilot_flavor "$remote")" || return 1
     fi
   fi
 
@@ -410,7 +430,7 @@ elif ! git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 elif [ -z "$ui_platform" ]; then
   state="unknown-platform"; reason="unable to determine UI platform for $OP_ROOT; pass --platform mici or --platform tizi"
 elif [ "$flavor_detected" -ne 1 ]; then
-  state="unknown-flavor"; reason="unsupported upstream remote for $OP_ROOT; CommaView currently supports commaai/openpilot, sunnypilot, and validated StarPilot remotes"
+  state="unknown-flavor"; reason="unsupported upstream remote for $OP_ROOT; CommaView currently supports commaai/openpilot, sunnypilot, and validated StarPilot remotes/checkouts"
 elif [ ! -f "$template_path" ]; then
   state="missing-template"; reason="missing socket UI export helper template for $flavor"
 elif [ ! -f "$TRANSFORMER" ]; then

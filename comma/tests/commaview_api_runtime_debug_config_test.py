@@ -407,6 +407,9 @@ def test_apply_patch_script_refuses_implicit_destructive_repair_and_backs_up_for
     assert 'github.com:commaai/openpilot' in text
     assert 'github.com:J3DOK3DO/openpilot' in text
     assert 'github.com:firestar5683/StarPilot' in text
+    assert 'VALIDATED_STARPILOT_C612_HEAD=\"7b4db9a26010ba9899eef242d3ca49b33cbcca9c\"' in text
+    assert 'VALIDATED_STARPILOT_C612_TREE=\"b4fb93496a26c996a4763a72fa16415b7a1a4012\"' in text
+    assert 'validated_local_starpilot_flavor()' in text
     assert 'github.com:sunnypilot/sunnypilot' in text
     assert 'github.com:sunnypilot/openpilot' in text
     assert 'selfdrive/ui/mici' in text
