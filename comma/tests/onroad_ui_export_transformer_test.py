@@ -1587,3 +1587,36 @@ def test_verify_without_car_params_reports_no_car(tmp_path):
     verify = REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh"
     status = json.loads(run_lifecycle_script(verify, install_dir, op_root, "--json", COMMAVIEWD_TEST_PARAMS_DIR=str(tmp_path / "none")).stdout)
     assert "carFingerprint" not in status
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://github.com/J3DOK3DO/openpilot.git",
+        "git@github.com:J3DOK3DO/openpilot.git",
+        "ssh://git@github.com/J3DOK3DO/openpilot.git",
+        "https://github.com/firestar5683/StarPilot.git",
+        "git@github.com:firestar5683/StarPilot.git",
+        "ssh://git@github.com/firestar5683/StarPilot.git",
+    ],
+)
+def test_apply_and_verify_accept_all_validated_starpilot_remote_forms(tmp_path, remote):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+
+    applied = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert applied.returncode == 0, applied.stderr
+    assert "ONROAD_UI_EXPORT_FLAVOR=openpilot" in (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
+
+    verified = run_lifecycle_script(
+        REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh",
+        install_dir,
+        op_root,
+        "--json",
+    )
+    assert verified.returncode == 0, verified.stdout
+    status = json.loads(verified.stdout)
+    assert status["patchVerified"] is True
+    assert status["flavor"] == "openpilot"
