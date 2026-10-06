@@ -60,7 +60,7 @@ test('an incompatible staging app stops publication before any mutation', async 
   assert.ok(mock.calls.every((call) => call.method === 'GET'));
 });
 test('downgrade checks include staging and require an intentional override', async () => {
-  const mock = mockFetch({ current: () => ({ ...manifest, runtimeTag: 'v0.0.58-alpha.1' }) });
+  const mock = mockFetch({ current: (url) => url.includes('staging') ? { ...manifest, runtimeTag: 'v0.0.58-alpha.1' } : manifest });
   await assert.rejects(publishToAccountServices(origins, 'access', 'release@example.com', beta, { ...mock, promoteCurrent: true }), /older runtime tag/);
   assert.ok(mock.calls.every((call) => call.method === 'GET'));
   await publishToAccountServices(origins, 'access', 'release@example.com', beta, { ...mock, promoteCurrent: true, allowRuntimeDowngrade: true });
