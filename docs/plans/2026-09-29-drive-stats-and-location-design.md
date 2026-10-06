@@ -23,9 +23,8 @@ and sunnypilot already write, read on demand or once after a drive.
 
 ## Location (off until turned on, per comma)
 
-- **Live, while driving:** sunnypilot's current position from memory params
-  (`/dev/shm/params/d/LastGPSPosition`) while it is fresh. Otherwise the comma's own newest GPS fix,
-  read straight from openpilot's msgq ring (`/dev/shm/msgq_gpsLocationExternal`,
+- **Live, while driving:** prefer the comma's own newest GPS fix, with its acquisition timestamp
+  and horizontal accuracy, read straight from openpilot's msgq ring (`/dev/shm/msgq_gpsLocationExternal`,
   `/dev/shm/msgq_gpsLocation`) by `src/gps_peek.cpp`:
   - the ring is mapped read-only and never written: no reader slot, no read pointer, no signal, so
     openpilot's publisher and subscribers cannot tell it is there;
@@ -34,7 +33,12 @@ and sunnypilot already write, read on demand or once after a drive.
     come round the ring meanwhile;
   - it runs only when a phone asks (about once a second) and every 5 s during a drive while location
     is on: microseconds each time.
-  If neither answers, the position at the end of the drive's last finished log minute
+  If GPS is unavailable, sunnypilot's saved position from memory params
+  (`/dev/shm/params/d/LastGPSPosition`) is a labelled fallback, dated by file write time. Its writer
+  can refresh old coordinates even when localization is invalid, so this timestamp cannot prove
+  GPS freshness. Consumers such as app speed-limit lookup must accept only the timestamped
+  `comma` GPS source and apply their own age/accuracy bounds. Repeated reads never change the
+  GPS acquisition timestamp. If neither source answers, the drive's last finished log minute
   (`commaview_drive_stats.py position`), about a minute behind.
 - **Where the last drive ended:** the comma's last fix, saved by the control service when the drive
   ends (`data/location-last.json`); otherwise the log's last fix, or sunnypilot's

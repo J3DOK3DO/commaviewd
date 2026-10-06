@@ -2,8 +2,8 @@
 """Drive stats and location, served to paired phones only, from what the comma already keeps.
 
 The control service notices each drive from the onroad flag and runs the drive stats script after
-it; location is off until turned on, comes live from sunnypilot's saved position or the comma's GPS
-read from openpilot's msgq ring (without subscribing), and is forgotten the moment it's turned off.
+it; location is off until turned on, prefers the comma's timestamped GPS read from openpilot's
+msgq ring (without subscribing), falls back to saved positions, and is forgotten when turned off.
 """
 
 import json
@@ -179,10 +179,25 @@ def main():
             status, body = request(port, "/commaview/location", token=token)
             assert body["onroad"] is True
             assert body["live"]["lat"] == 37.7749 and body["live"]["source"] == "comma" and body["live"]["fixMs"] == now_ms
-            # sunnypilot's live position wins while it's fresh.
+            # A timestamped GPS fix wins over sunnypilot's saved coordinates, even after the
+            # cache writer refreshes the file mtime. The original fix time and accuracy survive.
             (mem_params / "LastGPSPosition").write_text(json.dumps({"latitude": 37.8, "longitude": -122.3, "bearing": 45.0}))
             live_now = request(port, "/commaview/location", token=token)[1]["live"]
-            assert live_now["lat"] == 37.8 and live_now["bearingDeg"] == 45.0 and live_now["source"] == "sunnypilot"
+            assert live_now["lat"] == 37.7749 and live_now["source"] == "comma"
+            assert live_now["fixMs"] == now_ms and live_now["accuracyM"] == 4.5
+            for _ in range(3):
+                time.sleep(1.05)
+                (mem_params / "LastGPSPosition").write_text(json.dumps({"latitude": 37.8, "longitude": -122.3, "bearing": 45.0}))
+                live_now = request(port, "/commaview/location", token=token)[1]["live"]
+                assert live_now["source"] == "comma" and live_now["fixMs"] == now_ms
+                assert live_now["lat"] == 37.7749 and live_now["accuracyM"] == 4.5
+            assert int(time.time() * 1000) - live_now["fixMs"] > 3000
+            # A new GPS acquisition recovers normally while the cached position still exists.
+            recovered_ms = int(time.time() * 1000)
+            write_gps_queue(msgq / "msgq_gpsLocationExternal", [recovered_ms])
+            recovered = request(port, "/commaview/location", token=token)[1]["live"]
+            assert recovered["source"] == "comma" and recovered["fixMs"] == recovered_ms
+            assert recovered["lat"] == 37.7749 and recovered["accuracyM"] == 4.5
             (mem_params / "LastGPSPosition").unlink()
 
             # The drive ends: where it ended is kept from the comma's GPS, and the script runs.
