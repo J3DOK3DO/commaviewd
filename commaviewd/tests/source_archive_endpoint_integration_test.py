@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise private, bounded source archive reads through the real HTTP server."""
 
+import json
 import os
 from pathlib import Path
 import socket
@@ -69,22 +70,53 @@ def main():
       assert request(media, "wrong-token")[0] == 401
       status, body, headers = request(media, "source-test-token")
       assert (status, body, headers["X-Source-Size"]) == (200, b"2345", "10")
-      status, body, _ = request(base + "/commaview/source-recording/recipe?route=" + route,
-                                "source-test-token")
+      recipe = base + "/commaview/source-recording/recipe?route=" + route
+      status, body, _ = request(recipe, "source-test-token")
       assert status == 200 and b'"sequence":1' in body
       manifest = base + "/commaview/source-recording/manifest?route=" + route
       assert request(manifest)[0] == 401
-      assert request(manifest, "source-test-token")[:2] == (
-          200, ('{"routeId":"' + route + '","segments":[0]}').encode())
+      status, body, _ = request(manifest, "source-test-token")
+      assert status == 200 and json.loads(body) == {
+          "routeId": route, "segments": [0], "incompleteSegments": []}, (status, body)
+      (segment / "ecamera.hevc").unlink()
+      status, body, _ = request(manifest, "source-test-token")
+      assert status == 200 and json.loads(body) == {
+          "routeId": route, "segments": [],
+          "incompleteSegments": [{"segment": 0, "missing": ["wide"]}]}, (status, body)
+      (segment / "ecamera.hevc").write_bytes(b"wide")
       snapshot = (base + "/commaview/source-recording/range?route=" + route +
                   "&segment=0&kind=snapshot&offset=0&length=8")
       assert request(snapshot)[0] == 401
       assert request(snapshot, "source-test-token")[:2] == (200, b"snapshot")
       assert request(media.replace("length=4", "length=262145"), "source-test-token")[0] == 400
-      print("PASS: authenticated source archive HTTP range and recipe")
+      marker = recipes / f"ui-invalid-{route}"
+      marker.write_text("recording metadata incomplete\n", encoding="ascii")
+      for endpoint in (media, snapshot, recipe, manifest):
+        assert request(endpoint)[0] == 401
+        status, body, _ = request(endpoint, "source-test-token")
+        assert status == 409 and json.loads(body)["error"] == "recording metadata damaged", (status, body)
+      assert (segment / "fcamera.hevc").read_bytes() == b"0123456789"
+      assert (segment / "ecamera.hevc").read_bytes() == b"wide"
+      assert (segment / "rlog.zst").read_bytes() == b"log"
+      marker.unlink()
+      print("PASS: authenticated archive HTTP, incomplete manifests, durable damage refusal and preserved originals")
 
       # Onroad, a finished drive is served only while parked: never while the car is driven.
+      current = base + "/commaview/source-recording/current"
+      assert request(current)[0] == 401
+      assert request(current, "source-test-token")[0] == 403
       (params / "IsOffroad").write_text("0", encoding="ascii")
+      status, body, headers = request(current, "source-test-token")
+      startup = json.loads(body)
+      assert status == 404 and startup["error"] == "route unavailable", (status, body)
+      assert "recordingStatus" in startup and startup["routeChanged"] is False
+      (params / "CurrentRoute").write_text(route, encoding="ascii")
+      status, body, headers = request(current, "source-test-token")
+      ready_route = json.loads(body)
+      assert status == 200 and ready_route["routeId"] == route, (status, body)
+      assert ready_route["recordingStatus"]["roadState"] == "onroad"
+      assert ready_route["routeChanged"] is False and headers["Cache-Control"] == "no-store"
+      print("PASS: current-route HTTP startup evidence, onroad guard and embedded status")
       status, body, _ = request(manifest, "source-test-token")
       assert status == 403 and b"parked or offroad required" in body, (status, body)
       road_tool = os.environ.get("COMMAVIEWD_ROAD_QUEUE_TOOL")
