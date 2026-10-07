@@ -69,11 +69,22 @@ class SocketServer {
     LatestFrame frame;
     uint64_t sequence = 0;
   };
+  struct RecordingFault {
+    const char* reason = nullptr;
+    uint64_t count = 0;
+    int error_number = 0;
+    uint64_t bytes = 0;
+    uint64_t limit = 0;
+    uint8_t service_index = 0;
+  };
   void accept_loop();
   bool receive_one_frame(int client_fd);
   void mark_client_connected(bool connected);
   void offer_recipe_event(const LatestFrame& frame);
   void offer_snapshot(const LatestFrame& frame);
+  // Called with recipe_mutex_ held; only the writer thread emits these messages.
+  void offer_recording_fault(const char* reason, uint64_t count, int error_number,
+                             uint64_t bytes, uint64_t limit, uint8_t service_index);
   void recipe_writer_loop();
 
   std::string socket_path_;
@@ -85,6 +96,7 @@ class SocketServer {
   std::condition_variable recipe_condition_;
   std::deque<std::string> recipe_queue_;
   std::deque<SnapshotRecord> snapshot_queue_;
+  std::deque<RecordingFault> recording_faults_;
   uint64_t snapshot_sequence_ = 0;
   std::array<uint64_t, kServiceCount> last_snapshot_offer_ms_ = {};
   FILE* snapshot_file_ = nullptr;

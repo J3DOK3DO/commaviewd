@@ -85,6 +85,20 @@ int main() {
   assert(source_recording_archive_response(
       "/commaview/source-recording/range?route=" + route +
       "&segment=0&kind=snapshot&offset=0&length=8").body == "snapshot");
+  // The client accepts at most 64 KiB. Even the maximum missing-file manifest fits, and
+  // incomplete folders count toward the same route limit as complete ones.
+  const std::string bounded_route = "bounded--route";
+  for (int number = 0; number < 1000; ++number) {
+    assert(mkdir((root + "/" + bounded_route + "--" + std::to_string(number)).c_str(), 0700) == 0);
+  }
+  const std::string bounded_path = "/commaview/source-recording/manifest?route=" + bounded_route;
+  const auto bounded = source_recording_archive_response(bounded_path);
+  assert(bounded.status == 200 && bounded.body.size() <= 64 * 1024);
+  assert(mkdir((root + "/" + bounded_route + "--1000").c_str(), 0700) == 0);
+  assert(source_recording_archive_response(bounded_path).status == 413);
+  for (int number = 0; number <= 1000; ++number) {
+    assert(rmdir((root + "/" + bounded_route + "--" + std::to_string(number)).c_str()) == 0);
+  }
   unlink(link.c_str());
   unlink((segment + "/fcamera.hevc").c_str());
   unlink((segment + "/ecamera.hevc").c_str());
