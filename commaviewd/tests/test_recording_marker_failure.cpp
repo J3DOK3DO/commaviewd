@@ -1,0 +1,59 @@
+// A short POSIX write need not set errno. Exercise the real damage writer with
+// that failure, without filling the host's disk or requiring an AF_UNIX socket.
+#include "ui_export_socket.h"
+#include <cassert>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <iostream>
+#include <unistd.h>
+
+static bool short_marker_write = true;
+extern "C" ssize_t __real_write(int fd, const void* data, size_t size);
+extern "C" ssize_t __wrap_write(int fd, const void* data, size_t size) {
+  const char marker[] = "recording metadata incomplete\n";
+  if (short_marker_write && size == sizeof(marker) - 1 && std::memcmp(data, marker, size) == 0) {
+    short_marker_write = false;
+    const ssize_t written = __real_write(fd, data, 2);
+    assert(written == 2);
+    errno = ENOENT;  // Deliberately stale, unrelated to this successful partial write.
+    return written;
+  }
+  return __real_write(fd, data, size);
+}
+
+namespace commaview::ui_export {
+struct RecordingMetadataTestAccess {
+  static void exercise(SocketServer& server, const std::string& route) {
+    server.recipe_file_ = tmpfile();
+    assert(server.recipe_file_ != nullptr);
+    server.observe_route(route);
+    server.mark_route_damage(server.active_epoch_, "route_transition_discarded");
+    assert(server.metadata_damaged_ && !server.active_epoch_->damage_recorded);
+    assert(server.recipe_write_failures_ == 1);
+    assert(server.recording_faults_.size() == 1);
+    assert(server.recording_faults_.front().error_number == EIO);
+    assert(!std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-" + route));
+
+    // Recovery persists the marker but must retain the known integrity failure.
+    server.mark_route_damage(server.active_epoch_, "route_transition_discarded");
+    assert(server.active_epoch_->damage_recorded && server.metadata_damaged_);
+    assert(server.recipe_write_failures_ == 1);
+    assert(std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-" + route));
+    std::fclose(server.recipe_file_); server.recipe_file_ = nullptr;
+  }
+};
+}
+
+int main() {
+  char temp[] = "/tmp/commaview-marker-XXXXXX";
+  const char* directory = mkdtemp(temp); assert(directory != nullptr);
+  {
+    commaview::ui_export::SocketServer server(std::string(directory) + "/unused.sock", directory);
+    commaview::ui_export::RecordingMetadataTestAccess::exercise(server, "short--write");
+    assert(server.stats().metadata_damaged && server.stats().recipe_write_failures == 1);
+  }
+  std::filesystem::remove_all(directory);
+  std::cout << "PASS: partial marker write reports EIO, retries persistence and retains integrity failure\n";
+}

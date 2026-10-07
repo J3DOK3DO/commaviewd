@@ -486,8 +486,13 @@ void SocketServer::mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, c
   const char damaged[] = "recording metadata incomplete\n";
   bool persisted = fd >= 0;
   int persist_error = persisted ? 0 : errno;
-  if (persisted && (::write(fd, damaged, sizeof(damaged) - 1) != static_cast<ssize_t>(sizeof(damaged) - 1) || fdatasync(fd) != 0)) {
-    persisted = false; persist_error = errno ? errno : EIO;
+  if (persisted) {
+    const ssize_t count = ::write(fd, damaged, sizeof(damaged) - 1);
+    if (count != static_cast<ssize_t>(sizeof(damaged) - 1)) {
+      persisted = false; persist_error = count < 0 ? errno : EIO;
+    } else if (fdatasync(fd) != 0) {
+      persisted = false; persist_error = errno;
+    }
   }
   if (fd >= 0 && ::close(fd) != 0 && persisted) { persisted = false; persist_error = errno; }
   if (persisted && ::rename(temporary.c_str(), path.c_str()) != 0) { persisted = false; persist_error = errno; }
@@ -499,9 +504,10 @@ void SocketServer::mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, c
   ::unlink(temporary.c_str());
   const std::string marker = "\n{\"schemaVersion\":1,\"routeId\":\"" + epoch->route +
       "\",\"kind\":\"recording_fault\",\"sequence\":0,\"reason\":\"" + reason + "\"}\n";
+  errno = 0;
   const bool written = std::fwrite(marker.data(), 1, marker.size(), recipe_file_) == marker.size() &&
       std::fflush(recipe_file_) == 0 && fdatasync(fileno(recipe_file_)) == 0;
-  const int failure = written ? 0 : errno;
+  const int failure = written ? 0 : (errno ? errno : EIO);
   epoch->damage_recorded = written && persisted;
   if (!written || !persisted) {
     std::lock_guard<std::mutex> lock(recipe_mutex_);
