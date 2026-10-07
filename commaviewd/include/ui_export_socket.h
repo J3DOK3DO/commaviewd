@@ -78,6 +78,8 @@ class SocketServer {
     bool damage_recorded = false; // Only the writer reads/writes this flag.
     uint64_t damage_attempts = 0;
     const char* damage_reason = nullptr;
+    bool onroad_observed = false; // Only the writer reads/writes the drive lifecycle flags.
+    bool finalized = false; // Offroad after onroad; later UI traffic is outside this drive.
   };
   struct RecipeRecord {
     std::string line;

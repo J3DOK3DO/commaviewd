@@ -29,6 +29,7 @@ struct RecordingMetadataTestAccess {
     server.snapshot_bytes_ = 512ULL * 1024 * 1024;
   }
   static void drain(SocketServer& server) { server.recipe_stopping_ = true; server.recipe_writer_loop(); }
+  static void recheck_road(SocketServer& server) { server.offroad_checked_at_ = {}; }
   static std::string recipe_text(SocketServer& server) {
     std::fflush(server.recipe_file_); std::rewind(server.recipe_file_);
     std::string text; char buffer[4096];
@@ -72,6 +73,20 @@ int main() {
     Access::recipe(server, frame(kRecipeEventServiceIndex, R"({"kind":"anchor","sequence":2,"camera":"road","logMonoTime":234,"roadTimestampEof":567})", 3000));
     Access::snapshot(server, frame(0, "{}", 3000)); Access::drain(server);
     assert(server.stats().recipe_events == 1 && server.stats().snapshot_events == 1);
+    Access::close(server);
+  }
+  {
+    // CurrentRoute can change before IsOffroad. A new epoch that has not yet
+    // recorded onroad must remain available when that startup flag catches up.
+    const std::string startup = "startup--drive";
+    std::ofstream(current) << startup; std::ofstream(root + "/IsOffroad") << "1";
+    SocketServer server(root + "/unused.sock", root + "/recipes"); Access::prepare(server, startup);
+    Access::snapshot(server, frame(0, "{}")); Access::drain(server);
+    assert(!server.stats().snapshot_active && server.stats().snapshot_events == 0);
+    std::ofstream(root + "/IsOffroad") << "0"; Access::recheck_road(server);
+    Access::snapshot(server, frame(0, "{}", 2000)); Access::drain(server);
+    assert(server.stats().snapshot_active && server.stats().snapshot_events == 1);
+    assert(!server.stats().metadata_damaged);
     Access::close(server);
   }
   {
@@ -129,6 +144,60 @@ int main() {
     for (const char* reason : {"fault1", "fault2", "fault3", "fault4", "fault5", "fault6", "fault7", "fault8", "fault9"}) Access::fault(server, reason);
     assert(server.stats().recording_faults_suppressed == 1);
     Access::drain(server); Access::close(server);
+  }
+  {
+    // The UI keeps publishing offroad. Once the snapshot is finalized, that
+    // backlog is outside the finished recording and must not damage it when
+    // the next drive starts.
+    const std::string completed = "completed--drive", following = "following--drive";
+    std::ofstream(current) << completed; std::ofstream(root + "/IsOffroad") << "0";
+    SocketServer server(root + "/unused.sock", root + "/recipes"); Access::prepare(server, completed);
+    Access::recipe(server, frame(kRecipeEventServiceIndex,
+        R"({"kind":"anchor","sequence":1,"camera":"road","logMonoTime":123,"roadTimestampEof":456})"));
+    Access::snapshot(server, frame(0, "{}")); Access::drain(server);
+    assert(server.stats().snapshot_active && server.stats().snapshot_events == 1);
+
+    std::ofstream(root + "/IsOffroad") << "1"; Access::recheck_road(server);
+    Access::snapshot(server, frame(0, "{}", 2000)); Access::drain(server);
+    assert(!server.stats().snapshot_active && server.stats().snapshot_route.empty());
+    Access::snapshot(server, frame(0, "{}", 3000));
+    Access::recipe(server, frame(kRecipeEventServiceIndex,
+        R"({"kind":"anchor","sequence":2,"camera":"road","logMonoTime":234,"roadTimestampEof":567})", 3000));
+    std::ofstream(current) << following; std::ofstream(root + "/IsOffroad") << "0";
+    Access::drain(server); // Transition must invalidate the old cached offroad state itself.
+    assert(!std::filesystem::exists(root + "/recipes/ui-invalid-" + completed));
+    assert(Access::recipe_text(server).find("recording_fault") == std::string::npos);
+    assert(server.stats().metadata_route == following && !server.stats().metadata_damaged);
+    assert(server.stats().recipe_events == 0 && server.stats().snapshot_events == 0);
+
+    Access::recipe(server, frame(kRecipeEventServiceIndex,
+        R"({"kind":"anchor","sequence":3,"camera":"road","logMonoTime":345,"roadTimestampEof":678})", 4000));
+    Access::snapshot(server, frame(0, "{}", 4000)); Access::drain(server);
+    assert(server.stats().recipe_events == 1 && server.stats().snapshot_events == 1);
+    Access::close(server);
+  }
+  {
+    // Finalization must not abandon a known damage marker while its storage
+    // is unavailable. A directory at the temporary-file path fails even as root.
+    const std::string recovery = "recovery--drive", recipes = root + "/recipes";
+    std::ofstream(current) << recovery; std::ofstream(root + "/IsOffroad") << "0";
+    SocketServer server(root + "/unused.sock", recipes); Access::prepare(server, recovery);
+    Access::snapshot(server, frame(0, "{}")); Access::drain(server);
+    assert(server.stats().snapshot_active);
+    const std::string blocker = recipes + "/ui-invalid-" + recovery + ".tmp-" + std::to_string(getpid());
+    assert(std::filesystem::create_directory(blocker));
+    std::filesystem::remove(current);
+    Access::snapshot(server, frame(0, "{}", 2000)); Access::drain(server);
+    assert(server.stats().metadata_damaged && !std::filesystem::exists(recipes + "/ui-invalid-" + recovery));
+    std::ofstream(current) << recovery; std::ofstream(root + "/IsOffroad") << "1"; Access::recheck_road(server);
+    Access::snapshot(server, frame(0, "{}", 3000)); Access::drain(server);
+    assert(!server.stats().snapshot_active && !std::filesystem::exists(recipes + "/ui-invalid-" + recovery));
+    assert(std::filesystem::remove(blocker));
+    Access::snapshot(server, frame(0, "{}", 4000));
+    Access::snapshot(server, frame(0, "{}", 5000)); Access::drain(server);
+    assert(std::filesystem::exists(recipes + "/ui-invalid-" + recovery));
+    assert(server.stats().metadata_damaged && !server.stats().snapshot_active);
+    Access::close(server);
   }
   std::fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved); std::fclose(faults);
   std::ifstream logged(root + "/faults.log"); const std::string text((std::istreambuf_iterator<char>(logged)), {});

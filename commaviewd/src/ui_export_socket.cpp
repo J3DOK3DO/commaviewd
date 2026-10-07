@@ -461,6 +461,7 @@ void SocketServer::observe_route(const std::string& route) {
   recipe_events_ = recipe_dropped_ = recipe_write_failures_ = recipe_missing_route_ = 0;
   snapshot_events_ = snapshot_dropped_ = snapshot_write_failures_ = snapshot_missing_route_ = 0;
   snapshot_active_ = false;
+  offroad_checked_at_ = {}; // An old drive's cached road state cannot finalize the new epoch.
   last_snapshot_offer_ms_.fill(0);
   recording_fault_counts_.fill({});
 }
@@ -564,6 +565,11 @@ void SocketServer::recipe_writer_loop() {
       continue;
     }
     const std::string route = current_route_id();
+    if (!route.empty()) observe_route(route);
+    // Offroad UI traffic cannot extend a finalized drive or turn it into a
+    // damaged archive at the next ignition. Still observe the new route first,
+    // so future offers acquire its fresh epoch instead of remaining on the old one.
+    if (epoch && epoch->finalized) continue;
     if (route.empty()) {
       mark_route_damage(epoch, "route_unavailable");
       // Startup has no owner yet. A transient missing parameter during an
@@ -577,7 +583,6 @@ void SocketServer::recipe_writer_loop() {
       }
       continue;
     }
-    observe_route(route);
     if (!epoch || epoch->generation != route_generation_) {
       mark_route_damage(epoch, "route_transition_discarded");
       std::lock_guard<std::mutex> lock(recipe_mutex_);
@@ -597,6 +602,11 @@ void SocketServer::recipe_writer_loop() {
         offroad_ = comma_offroad();
       }
       if (offroad_) {
+        // CurrentRoute can change before IsOffroad at startup. Only finalize
+        // an observed drive after any known damage is durable; pending marker
+        // writes must retain their bounded retries when storage recovers offroad.
+        epoch->finalized = epoch->onroad_observed &&
+            (epoch->damage_attempts == 0 || epoch->damage_recorded);
         if (snapshot_file_ != nullptr) {
           // Final for this route: openpilot starts a new route each time the car goes onroad.
           sync_and_close(snapshot_file_);
@@ -607,6 +617,7 @@ void SocketServer::recipe_writer_loop() {
         }
         continue;
       }
+      epoch->onroad_observed = true;
       if (snapshot_route_ != route || snapshot_file_ == nullptr) {
         if (snapshot_file_ != nullptr) sync_and_close(snapshot_file_);
         const std::string path = recipe_dir_ + "/ui-snapshot-" + route + ".jsonl";

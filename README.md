@@ -145,10 +145,15 @@ and brackets status collection with fresh route/onroad checks. Existing clients 
 Queued recipe/snapshot records carry the generation observed by the producer, so backlog from
 one route cannot become healthy metadata for another route. The writer discards stale records
 and marks the old route damaged in a synced private `ui-invalid-<route>` sidecar and a recipe
-fault row. A missing route parameter during an established drive preserves its counters and
+fault row. Once the writer observes an onroad drive going offroad and finalizes it, subsequent UI traffic for
+that drive is ignored; it cannot mark a healthy completed archive damaged at the next ignition.
+A new route refreshes the cached road state before accepting snapshots; a startup offroad
+flag cannot finalize a drive that has not yet been observed onroad. A missing route
+parameter during an established drive preserves its counters and
 marks damage; initial startup waits for a known route. The sidecar restores `metadataDamaged`
 after restart, and archive endpoints return 409 for that route. Original comma segments are
 never removed by this processing. Other integrity counters still reset on a new route/restart.
+Pending damage-marker writes keep their bounded retries offroad until the damage is durable.
 
 Technical recording faults use the existing persistent logger from the metadata writer.
 The eight-entry queue and 32 fixed reason/errno counters emit occurrences 1, 2, 4, 8, etc.
