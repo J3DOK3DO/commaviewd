@@ -244,6 +244,7 @@ HttpResponse manifest_response(const std::map<std::string, std::string>& q) {
   }
   const std::string prefix = q.at("route") + "--";
   std::vector<uint64_t> segments;
+  std::map<uint64_t, std::vector<std::string>> incomplete;
   while (const dirent* entry = ::readdir(listing)) {
     const std::string name = entry->d_name;
     if (name.rfind(prefix, 0) != 0) continue;
@@ -252,28 +253,45 @@ HttpResponse manifest_response(const std::map<std::string, std::string>& q) {
         name != prefix + std::to_string(number)) continue;
     const int dir = open_directory_at(root, name.c_str());
     if (dir < 0) continue;
-    bool complete = true;
+    std::vector<std::string> missing;
+    size_t kind = 0;
+    const char* kinds[] = {"road", "wide", "rlog"};
     for (const char* file_name : {"fcamera.hevc", "ecamera.hevc", "rlog.zst"}) {
       const int file = open_file_at(dir, file_name);
       struct stat info = {};
       if (file < 0 || ::fstat(file, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0) {
-        complete = false;
+        missing.emplace_back(kinds[kind]);
       }
       if (file >= 0) ::close(file);
-      if (!complete) break;
+      ++kind;
     }
     ::close(dir);
-    if (complete) segments.push_back(number);
-    if (segments.size() > 1000) break;
+    if (missing.empty()) segments.push_back(number);
+    else incomplete.emplace(number, std::move(missing));
+    if (segments.size() + incomplete.size() > 1000) break;
   }
   ::closedir(listing);
-  if (segments.size() > 1000) return error(413, "route too large");
-  if (segments.empty()) return error(404, "route archive unavailable");
+  if (segments.size() + incomplete.size() > 1000) return error(413, "route too large");
+  if (segments.empty() && incomplete.empty()) return error(404, "route archive unavailable");
   std::sort(segments.begin(), segments.end());
   std::string body = "{\"routeId\":\"" + q.at("route") + "\",\"segments\":[";
   for (size_t i = 0; i < segments.size(); ++i) {
     if (i) body += ',';
     body += std::to_string(segments[i]);
+  }
+  // Existing clients still receive only complete segments in `segments`. An existing route
+  // with unfinished/missing files is different from one whose directories are absent.
+  body += "],\"incompleteSegments\":[";
+  bool first = true;
+  for (const auto& entry : incomplete) {
+    if (!first) body += ',';
+    first = false;
+    body += "{\"segment\":" + std::to_string(entry.first) + ",\"missing\":[";
+    for (size_t i = 0; i < entry.second.size(); ++i) {
+      if (i) body += ',';
+      body += "\"" + entry.second[i] + "\"";
+    }
+    body += "]}";
   }
   body += "]}";
   HttpResponse response;

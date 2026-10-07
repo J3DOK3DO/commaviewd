@@ -58,7 +58,24 @@ int main() {
   assert(recipe.body.find("other--route") == std::string::npos);
   const std::string manifest_path = "/commaview/source-recording/manifest?route=" + route;
   assert(source_recording_archive_response(manifest_path).body ==
-         "{\"routeId\":\"" + route + "\",\"segments\":[0]}");
+         "{\"routeId\":\"" + route + "\",\"segments\":[0],\"incompleteSegments\":[]}");
+  assert(source_recording_archive_response(
+      "/commaview/source-recording/manifest?route=absent--route").status == 404);
+  // An empty/missing required file does not mean the entire route was deleted.
+  std::ofstream(segment + "/ecamera.hevc", std::ios::binary | std::ios::trunc).close();
+  assert(unlink((segment + "/rlog.zst").c_str()) == 0);
+  const auto incomplete = source_recording_archive_response(manifest_path);
+  assert(incomplete.status == 200);
+  assert(incomplete.body == "{\"routeId\":\"" + route +
+         "\",\"segments\":[],\"incompleteSegments\":[{\"segment\":0,\"missing\":[\"wide\",\"rlog\"]}]}");
+  std::ofstream(segment + "/ecamera.hevc", std::ios::binary) << "wide";
+  std::ofstream(segment + "/rlog.zst", std::ios::binary) << "log";
+  assert(source_recording_archive_response(manifest_path).body.find("\"segments\":[0]") != std::string::npos);
+  // Repeated reads on different clients leave the original segment intact.
+  assert(source_recording_archive_response(range).body == "2345");
+  assert(source_recording_archive_response(range).body == "2345");
+  struct stat original = {};
+  assert(stat((segment + "/fcamera.hevc").c_str(), &original) == 0 && original.st_size == 10);
   const std::string link = root + "/" + route + "--1";
   assert(symlink(segment.c_str(), link.c_str()) == 0);
   assert(source_recording_archive_response(
@@ -77,5 +94,5 @@ int main() {
   rmdir(segment.c_str());
   rmdir(recipes.c_str());
   rmdir(root.c_str());
-  std::puts("PASS: source archive ranges, route filtering and traversal guards");
+  std::puts("PASS: source archive reads, incomplete/absent routes, and traversal guards");
 }
