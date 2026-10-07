@@ -511,8 +511,11 @@ void SocketServer::mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, c
   epoch->damage_recorded = written && persisted;
   if (!written || !persisted) {
     std::lock_guard<std::mutex> lock(recipe_mutex_);
-    ++recipe_write_failures_;
-    offer_recording_fault("route_damage_marker_write_failed", recipe_write_failures_, !written ? failure : persist_error, marker.size(), 0, kRecipeEventServiceIndex);
+    // The writer may still be retiring an old epoch after observe_route has
+    // reset the counters for the next drive. Keep its fault evidence without
+    // making that healthy drive permanently fail recording preflight.
+    if (epoch == active_epoch_) ++recipe_write_failures_;
+    offer_recording_fault("route_damage_marker_write_failed", attempt, !written ? failure : persist_error, marker.size(), 0, kRecipeEventServiceIndex);
   }
 }
 

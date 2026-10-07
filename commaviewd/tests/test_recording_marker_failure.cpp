@@ -25,6 +25,28 @@ extern "C" ssize_t __wrap_write(int fd, const void* data, size_t size) {
 
 namespace commaview::ui_export {
 struct RecordingMetadataTestAccess {
+  static void old_route_failure(SocketServer& server) {
+    server.recipe_file_ = tmpfile();
+    assert(server.recipe_file_ != nullptr);
+    server.observe_route("old--drive");
+    auto old_epoch = server.active_epoch_;
+    server.observe_route("new--drive");
+    short_marker_write = true;
+    server.mark_route_damage(old_epoch, "route_transition_discarded");
+    // Failure to persist the discarded OLD backlog must not fabricate a
+    // metadata write failure for the new drive (which is terminal in Android).
+    assert(!server.metadata_damaged_);
+    assert(server.recipe_write_failures_ == 0);
+    assert(!old_epoch->damage_recorded);
+    assert(server.recording_faults_.back().error_number == EIO);
+    server.mark_route_damage(old_epoch, "route_transition_discarded");
+    assert(old_epoch->damage_recorded);
+    assert(std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-old--drive"));
+    assert(!std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-new--drive"));
+    assert(server.recipe_write_failures_ == 0);
+    std::fclose(server.recipe_file_); server.recipe_file_ = nullptr;
+  }
+
   static void exercise(SocketServer& server, const std::string& route) {
     server.recipe_file_ = tmpfile();
     assert(server.recipe_file_ != nullptr);
@@ -53,6 +75,10 @@ int main() {
     commaview::ui_export::SocketServer server(std::string(directory) + "/unused.sock", directory);
     commaview::ui_export::RecordingMetadataTestAccess::exercise(server, "short--write");
     assert(server.stats().metadata_damaged && server.stats().recipe_write_failures == 1);
+  }
+  {
+    commaview::ui_export::SocketServer server(std::string(directory) + "/unused.sock", directory);
+    commaview::ui_export::RecordingMetadataTestAccess::old_route_failure(server);
   }
   std::filesystem::remove_all(directory);
   std::cout << "PASS: partial marker write reports EIO, retries persistence and retains integrity failure\n";
