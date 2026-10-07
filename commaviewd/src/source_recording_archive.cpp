@@ -307,6 +307,15 @@ commaview::api::HttpResponse source_recording_archive_response(const std::string
   const std::string endpoint = request_path.substr(0, question);
   std::map<std::string, std::string> query;
   if (!parse_query(request_path, &query)) return error(400, "invalid query");
+  if (query.count("route") && safe_route(query.at("route"))) {
+    const int root = open_directory(recipe_root());
+    if (root >= 0) {
+      struct stat marker = {};
+      const bool damaged = ::fstatat(root, ("ui-invalid-" + query.at("route")).c_str(), &marker, AT_SYMLINK_NOFOLLOW) == 0;
+      ::close(root);
+      if (damaged) return error(409, "recording metadata damaged");
+    }
+  }
   if (endpoint == "/commaview/source-recording/range") return range_response(query);
   if (endpoint == "/commaview/source-recording/recipe") return recipe_response(query);
   if (endpoint == "/commaview/source-recording/manifest") return manifest_response(query);
@@ -317,6 +326,18 @@ commaview::api::HttpResponse source_recording_current_response(const std::string
   if (!safe_route(route_id)) return error(404, "route unavailable");
   HttpResponse response;
   response.body = "{\"routeId\":\"" + route_id + "\"}";
+  response.headers["Cache-Control"] = "no-store";
+  return response;
+}
+
+commaview::api::HttpResponse source_recording_preflight_response(
+    const std::string& route_before, const std::string& status_json,
+    const std::string& route_after, bool onroad_after) {
+  auto response = !onroad_after ? error(403, "onroad required") :
+      route_before != route_after ? error(404, "route unavailable") : source_recording_current_response(route_before);
+  response.body.pop_back();
+  response.body += ",\"recordingStatus\":" + status_json +
+      ",\"routeChanged\":" + (route_before != route_after ? "true" : "false") + "}";
   response.headers["Cache-Control"] = "no-store";
   return response;
 }

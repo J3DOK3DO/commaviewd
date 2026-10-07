@@ -20,6 +20,11 @@ int main() {
   const std::string route = "000004b4--75e1f0ba8f";
   assert(source_recording_current_response(route).body.find(route) != std::string::npos);
   assert(source_recording_current_response("../secret").status == 404);
+  const auto preflight = commaview::runtime::source_recording_preflight_response(route, "{\"roadState\":\"onroad\"}", route, true);
+  assert(preflight.status == 200);
+  assert(preflight.body.find("\"recordingStatus\":{\"roadState\":\"onroad\"}") != std::string::npos);
+  assert(commaview::runtime::source_recording_preflight_response(route, "{}", "new--route", true).status == 404);
+  assert(commaview::runtime::source_recording_preflight_response(route, "{}", route, false).status == 403);
   const std::string segment = root + "/" + route + "--0";
   const std::string recipes = root + "/recipes";
   assert(mkdir(segment.c_str(), 0700) == 0);
@@ -99,6 +104,19 @@ int main() {
   for (int number = 0; number <= 1000; ++number) {
     assert(rmdir((root + "/" + bounded_route + "--" + std::to_string(number)).c_str()) == 0);
   }
+  // A durable metadata fault refuses all archive reads, including after runtime restart,
+  // while preserving the comma originals and leaving a different route available.
+  const std::string fault = recipes + "/ui-invalid-" + route;
+  std::ofstream(fault) << "recording metadata incomplete\n";
+  assert(source_recording_archive_response(manifest_path).status == 409);
+  assert(source_recording_archive_response(range).status == 409);
+  assert(source_recording_archive_response(
+      "/commaview/source-recording/recipe?route=" + route).status == 409);
+  assert(source_recording_archive_response(
+      "/commaview/source-recording/manifest?route=absent--route").status == 404);
+  assert(stat((segment + "/fcamera.hevc").c_str(), &original) == 0 && original.st_size == 10);
+  assert(unlink(fault.c_str()) == 0);
+  assert(source_recording_archive_response(range).body == "2345");
   unlink(link.c_str());
   unlink((segment + "/fcamera.hevc").c_str());
   unlink((segment + "/ecamera.hevc").c_str());
@@ -108,5 +126,5 @@ int main() {
   rmdir(segment.c_str());
   rmdir(recipes.c_str());
   rmdir(root.c_str());
-  std::puts("PASS: source archive reads, incomplete/absent routes, and traversal guards");
+  std::puts("PASS: source archive reads, damaged/incomplete/absent routes, and traversal guards");
 }

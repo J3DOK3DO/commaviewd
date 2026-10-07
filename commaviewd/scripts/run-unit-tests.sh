@@ -101,6 +101,11 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   -o "$TMP/test_source_recording_archive"
 
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
+  "$ROOT/tests/test_recording_metadata.cpp" \
+  "$ROOT/src/ui_export_socket.cpp" \
+  -o "$TMP/test_recording_metadata"
+
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
   "$ROOT/tests/test_recording_records.cpp" \
   "$ROOT/src/recording_records.cpp" \
   -o "$TMP/test_recording_records"
@@ -185,6 +190,7 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
 "$TMP/test_video_send_accounting"
 "$TMP/test_http_server_cloexec"
 "$TMP/test_ui_export_socket"
+"$TMP/test_recording_metadata"
 "$TMP/test_source_recording_archive"
 "$TMP/test_recording_records"
 "$TMP/test_drive_retention"

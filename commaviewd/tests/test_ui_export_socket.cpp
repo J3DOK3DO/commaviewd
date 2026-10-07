@@ -94,6 +94,13 @@ int main() {
     route << "000004b4--75e1f0ba8f\n";
   }
   assert(send_frame(client_fd, 0, R"({"exportVersion":4,"speedMps":12.4,"logMonoTime":457})"));
+  // The first queued frame wakes the writer to observe the new route. Only
+  // subsequent generation-bound frames may become this drive's metadata.
+  for (int i = 0; i < 100 && server.stats().metadata_route.empty(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  assert(server.stats().metadata_route == "000004b4--75e1f0ba8f");
+  assert(send_frame(client_fd, 0, R"({"exportVersion":4,"speedMps":12.4,"logMonoTime":458})"));
 
   const auto stats = server.stats();
   assert(stats.running);
