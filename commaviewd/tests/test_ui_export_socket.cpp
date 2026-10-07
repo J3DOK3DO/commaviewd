@@ -191,6 +191,7 @@ int main() {
   }
   assert(snapshot_closed);
   const auto closed = server.stats();
+  assert(closed.snapshot_route.empty());
   const std::string offroad_snapshot_path = recipe_dir + "/ui-snapshot-000004b4--75e1f0ba8f.jsonl";
   std::ifstream before_file(offroad_snapshot_path, std::ios::ate | std::ios::binary);
   const auto size_before = before_file.tellg();
@@ -261,6 +262,7 @@ int main() {
   }
   assert(failing.stats().snapshot_write_failures == 1);
   assert(!failing.stats().snapshot_active);
+  assert(failing.stats().snapshot_route == bad_route);
   failing.stop();  // Drains pending fault messages before the log is read.
   close(failing_client);
   assert(dup2(saved_error, STDERR_FILENO) >= 0);

@@ -463,20 +463,20 @@ void SocketServer::recipe_writer_loop() {
           // Final for this route: openpilot starts a new route each time the car goes onroad.
           sync_and_close(snapshot_file_);
           snapshot_file_ = nullptr;
-          snapshot_route_.clear();
           std::lock_guard<std::mutex> lock(recipe_mutex_);
+          snapshot_route_.clear();
           snapshot_active_ = false;
         }
         continue;
       }
       if (snapshot_route_ != route || snapshot_file_ == nullptr) {
         if (snapshot_file_ != nullptr) sync_and_close(snapshot_file_);
-        snapshot_route_ = route;
         const std::string path = recipe_dir_ + "/ui-snapshot-" + route + ".jsonl";
         snapshot_file_ = std::fopen(path.c_str(), "a");
         if (snapshot_file_ == nullptr) {
           const int failure = errno;
           std::lock_guard<std::mutex> lock(recipe_mutex_);
+          snapshot_route_ = route;
           snapshot_active_ = false;
           ++snapshot_write_failures_;
           offer_recording_fault("snapshot_open_failed", snapshot_write_failures_, failure, 0, 0,
@@ -491,6 +491,7 @@ void SocketServer::recipe_writer_loop() {
         }
         {
           std::lock_guard<std::mutex> lock(recipe_mutex_);
+          snapshot_route_ = route;
           snapshot_active_ = snapshot_file_ != nullptr;
         }
       }
