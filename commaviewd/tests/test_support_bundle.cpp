@@ -294,6 +294,8 @@ void kernel() {
 }  // namespace
 
 int main() {
+  expect("{\"recipeRoute\":\"review--routeA\",\"snapshotRoute\":\"review--routeA\",\"metadataRoute\":\"review--routeA\",\"sessionId\":\"source_123_456\"}",
+         "{\"recipeRoute\":\"redacted-recording-reference\",\"snapshotRoute\":\"redacted-recording-reference\",\"metadataRoute\":\"redacted-recording-reference\",\"sessionId\":\"redacted-recording-reference\"}");
   char dir_template[] = "/tmp/commaview-support-bundle-XXXXXX";
   const std::string root = mkdtemp(dir_template);
 

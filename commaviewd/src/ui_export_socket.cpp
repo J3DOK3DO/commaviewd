@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -54,9 +55,14 @@ bool is_single_line_json_object(const std::string& json) {
 }
 
 void sync_and_close(FILE* file) {
-  std::fflush(file);
-  fdatasync(fileno(file));
-  std::fclose(file);
+  int failure = 0;
+  if (std::fflush(file) != 0) failure = errno;
+  if (fdatasync(fileno(file)) != 0 && failure == 0) failure = errno;
+  if (std::fclose(file) != 0 && failure == 0) failure = errno;
+  if (failure != 0) {
+    std::fprintf(stderr, "[ui-export] recording_fault wall_ms=%llu reason=snapshot_close_failed errno=%d\n",
+                 static_cast<unsigned long long>(now_ms()), failure);
+  }
 }
 
 bool ensure_parent_dirs(const std::string& path) {
@@ -181,8 +187,7 @@ SocketServer::~SocketServer() {
 
 bool SocketServer::start() {
   if (running_.load()) return true;
-  active_route_.clear();
-  recipe_route_.clear();
+  observe_route(current_route_id());
   if (!ensure_parent_dirs(socket_path_)) {
     std::fprintf(stderr, "[ui-export] failed to create parent dirs for %s\n", socket_path_.c_str());
     return false;
@@ -228,8 +233,9 @@ bool SocketServer::start() {
       if (recipe_file_ != nullptr) fchmod(fileno(recipe_file_), 0600);
     }
     if (recipe_file_ == nullptr) {
-      std::fprintf(stderr, "[ui-export] source recipe disabled: cannot open %s\n",
-                   recipe_file_path_.c_str());
+      const int failure = errno;
+      std::fprintf(stderr, "[ui-export] source recipe disabled: cannot open %s errno=%d\n",
+                   recipe_file_path_.c_str(), failure);
       recipe_file_path_.clear();
     } else {
       recipe_stopping_ = false;
@@ -318,6 +324,11 @@ SocketStats SocketServer::stats() const {
     result.snapshot_missing_route = snapshot_missing_route_;
     result.snapshot_active = snapshot_active_;
     result.snapshot_route = snapshot_route_;
+    result.metadata_route = active_route_;
+    result.route_generation = route_generation_;
+    result.route_transition_discarded = route_transition_discarded_;
+    result.recording_faults_suppressed = recording_faults_suppressed_;
+    result.metadata_damaged = metadata_damaged_;
   }
   return result;
 }
@@ -346,10 +357,12 @@ void SocketServer::offer_recipe_event(const LatestFrame& frame) {
   std::lock_guard<std::mutex> lock(recipe_mutex_);
   if (recipe_queue_.size() >= kMaxRecipeQueue) {
     ++recipe_dropped_;
+    offer_recording_fault("recipe_queue_full", recipe_dropped_, 0, recipe_queue_.size(),
+                          kMaxRecipeQueue, frame.service_index);
     return;
   }
-  recipe_queue_.push_back("{\"schemaVersion\":1,\"capturedWallMs\":" +
-                          std::to_string(frame.updated_at_ms) + "," + json.substr(1) + "\n");
+  recipe_queue_.push_back({"{\"schemaVersion\":1,\"capturedWallMs\":" +
+                          std::to_string(frame.updated_at_ms) + "," + json.substr(1) + "\n", active_epoch_});
   recipe_condition_.notify_one();
 }
 
@@ -362,6 +375,8 @@ void SocketServer::offer_snapshot(const LatestFrame& frame) {
     std::lock_guard<std::mutex> lock(recipe_mutex_);
     ++snapshot_sequence_;
     ++snapshot_dropped_;
+    offer_recording_fault("snapshot_payload_too_large", snapshot_dropped_, 0, frame.payload.size(),
+                          kMaxSnapshotPayload, frame.service_index);
     return;
   }
   const std::string json(frame.payload.begin(), frame.payload.end());
@@ -369,6 +384,8 @@ void SocketServer::offer_snapshot(const LatestFrame& frame) {
     std::lock_guard<std::mutex> lock(recipe_mutex_);
     ++snapshot_sequence_;
     ++snapshot_dropped_;
+    offer_recording_fault("snapshot_json_invalid", snapshot_dropped_, 0, frame.payload.size(),
+                          kMaxSnapshotPayload, frame.service_index);
     return;
   }
   std::lock_guard<std::mutex> lock(recipe_mutex_);
@@ -378,42 +395,203 @@ void SocketServer::offer_snapshot(const LatestFrame& frame) {
   const uint64_t sequence = ++snapshot_sequence_;
   if (snapshot_queue_.size() >= kMaxSnapshotQueue) {
     ++snapshot_dropped_;
+    offer_recording_fault("snapshot_queue_full", snapshot_dropped_, 0, snapshot_queue_.size(),
+                          kMaxSnapshotQueue, frame.service_index);
     return;
   }
-  snapshot_queue_.push_back({frame, sequence});
+  snapshot_queue_.push_back({frame, sequence, active_epoch_});
   recipe_condition_.notify_one();
 }
 
+void SocketServer::offer_recording_fault(const char* reason, uint64_t count, int error_number,
+                                        uint64_t bytes, uint64_t limit, uint8_t service_index) {
+  // Counts are per reason/errno, not a shared integrity counter: another reason's
+  // third failure must still preserve this cause's first occurrence.
+  (void)count;
+  FaultCounter* counter = nullptr;
+  for (auto& entry : recording_fault_counts_) {
+    if (entry.reason != nullptr && entry.error_number == error_number && std::strcmp(entry.reason, reason) == 0) {
+      counter = &entry;
+      break;
+    }
+  }
+  if (counter == nullptr) {
+    for (auto& entry : recording_fault_counts_) {
+      if (entry.reason == nullptr) { entry.reason = reason; entry.error_number = error_number; counter = &entry; break; }
+    }
+  }
+  if (counter == nullptr) {
+    ++recording_faults_suppressed_;
+    recipe_condition_.notify_one();
+    return;
+  }
+  const uint64_t occurrence = ++counter->count;
+  if ((occurrence & (occurrence - 1)) != 0) return;
+  if (recording_faults_.size() >= 8) {
+    // Prefer a new first cause over a queued repeat. All-first saturation is
+    // accounted for and reported by the writer, never silently ignored.
+    auto repeat = recording_faults_.end();
+    if (occurrence == 1) {
+      for (auto it = recording_faults_.begin(); it != recording_faults_.end(); ++it) {
+        if (it->count > 1) { repeat = it; break; }
+      }
+    }
+    ++recording_faults_suppressed_;
+    if (repeat == recording_faults_.end()) { recipe_condition_.notify_one(); return; }
+    recording_faults_.erase(repeat);
+  }
+  recording_faults_.push_back({reason, occurrence, error_number, bytes, limit, service_index, now_ms()});
+  recipe_condition_.notify_one();
+}
+
+void SocketServer::observe_route(const std::string& route) {
+  // Once per transition/startup, off the frame path. Restore known route damage.
+  if (route == active_route_) return;
+  struct stat marker = {};
+  const bool damaged = !route.empty() &&
+      ::lstat((recipe_dir_ + "/ui-invalid-" + route).c_str(), &marker) == 0;
+  std::lock_guard<std::mutex> lock(recipe_mutex_);
+  if (route == active_route_) return;
+  active_route_ = route;
+  ++route_generation_;
+  active_epoch_ = std::make_shared<RouteEpoch>(RouteEpoch{route, route_generation_, false});
+  metadata_damaged_ = damaged;
+  recipe_route_.clear();
+  snapshot_route_.clear();
+  recipe_events_ = recipe_dropped_ = recipe_write_failures_ = recipe_missing_route_ = 0;
+  snapshot_events_ = snapshot_dropped_ = snapshot_write_failures_ = snapshot_missing_route_ = 0;
+  snapshot_active_ = false;
+  offroad_checked_at_ = {}; // An old drive's cached road state cannot finalize the new epoch.
+  last_snapshot_offer_ms_.fill(0);
+  recording_fault_counts_.fill({});
+}
+
+void SocketServer::mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, const char* reason) {
+  if (!epoch || epoch->route.empty() || epoch->damage_recorded || recipe_file_ == nullptr) return;
+  // Failed storage must not turn damage-marker retries into per-frame IO.
+  const uint64_t attempt = ++epoch->damage_attempts;
+  if ((attempt & (attempt - 1)) != 0) return;
+  if (epoch->damage_reason == nullptr) epoch->damage_reason = reason;
+  reason = epoch->damage_reason;
+  // Once per damaged route, on the writer only. The paired archive retains this
+  // marker across restarts; old clients also fail closed on sequence zero.
+  {
+    std::lock_guard<std::mutex> lock(recipe_mutex_);
+    if (epoch == active_epoch_) metadata_damaged_ = true;
+  }
+  // A tiny atomic sidecar restores the guard after restart. Sequence zero in
+  // the recipe below also makes older clients fail closed.
+  const std::string path = recipe_dir_ + "/ui-invalid-" + epoch->route;
+  const std::string temporary = path + ".tmp-" + std::to_string(getpid());
+  const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+  const char damaged[] = "recording metadata incomplete\n";
+  bool persisted = fd >= 0;
+  int persist_error = persisted ? 0 : errno;
+  if (persisted) {
+    const ssize_t count = ::write(fd, damaged, sizeof(damaged) - 1);
+    if (count != static_cast<ssize_t>(sizeof(damaged) - 1)) {
+      persisted = false; persist_error = count < 0 ? errno : EIO;
+    } else if (fdatasync(fd) != 0) {
+      persisted = false; persist_error = errno;
+    }
+  }
+  if (fd >= 0 && ::close(fd) != 0 && persisted) { persisted = false; persist_error = errno; }
+  if (persisted && ::rename(temporary.c_str(), path.c_str()) != 0) { persisted = false; persist_error = errno; }
+  if (persisted) {
+    const int parent = ::open(recipe_dir_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent < 0 || ::fsync(parent) != 0) { persisted = false; persist_error = errno; }
+    if (parent >= 0) ::close(parent);
+  }
+  ::unlink(temporary.c_str());
+  const std::string marker = "\n{\"schemaVersion\":1,\"routeId\":\"" + epoch->route +
+      "\",\"kind\":\"recording_fault\",\"sequence\":0,\"reason\":\"" + reason + "\"}\n";
+  errno = 0;
+  const bool written = std::fwrite(marker.data(), 1, marker.size(), recipe_file_) == marker.size() &&
+      std::fflush(recipe_file_) == 0 && fdatasync(fileno(recipe_file_)) == 0;
+  const int failure = written ? 0 : (errno ? errno : EIO);
+  epoch->damage_recorded = written && persisted;
+  if (!written || !persisted) {
+    std::lock_guard<std::mutex> lock(recipe_mutex_);
+    // The writer may still be retiring an old epoch after observe_route has
+    // reset the counters for the next drive. Keep its fault evidence without
+    // making that healthy drive permanently fail recording preflight.
+    if (epoch == active_epoch_) ++recipe_write_failures_;
+    offer_recording_fault("route_damage_marker_write_failed", attempt, !written ? failure : persist_error, marker.size(), 0, kRecipeEventServiceIndex);
+  }
+}
+
 void SocketServer::recipe_writer_loop() {
+  const auto suppression_due = [this] {
+    return recording_faults_suppressed_ > reported_faults_suppressed_ &&
+        (reported_faults_suppressed_ == 0 || recording_faults_suppressed_ / 2 >= reported_faults_suppressed_ || recipe_stopping_);
+  };
   while (true) {
     std::string line;
     SnapshotRecord snapshot;
+    RecordingFault fault;
     bool has_snapshot = false;
+    std::shared_ptr<RouteEpoch> epoch;
     {
       std::unique_lock<std::mutex> lock(recipe_mutex_);
-      recipe_condition_.wait(lock, [this] {
-        return recipe_stopping_ || !recipe_queue_.empty() || !snapshot_queue_.empty();
+      recipe_condition_.wait(lock, [this, &suppression_due] {
+        return recipe_stopping_ || !recipe_queue_.empty() || !snapshot_queue_.empty() || !recording_faults_.empty() ||
+            suppression_due();
       });
-      if (recipe_queue_.empty() && snapshot_queue_.empty() && recipe_stopping_) break;
+      if (recipe_queue_.empty() && snapshot_queue_.empty() && recording_faults_.empty() &&
+          recording_faults_suppressed_ == reported_faults_suppressed_ && recipe_stopping_) break;
       if (!recipe_queue_.empty()) {
-        line = std::move(recipe_queue_.front());
+        epoch = recipe_queue_.front().epoch;
+        line = std::move(recipe_queue_.front().line);
         recipe_queue_.pop_front();
+      } else if (!recording_faults_.empty()) {
+        fault = recording_faults_.front();
+        recording_faults_.pop_front();
+      } else if (suppression_due()) {
+        reported_faults_suppressed_ = recording_faults_suppressed_;
+        fault = {"recording_fault_queue_overflow", reported_faults_suppressed_, 0, 0, 8, 0, now_ms()};
       } else {
         snapshot = std::move(snapshot_queue_.front());
         snapshot_queue_.pop_front();
         has_snapshot = true;
+        epoch = snapshot.epoch;
       }
     }
-    const std::string route = current_route_id();
-    if (route.empty()) continue;
-    if (route != active_route_) {
-      std::lock_guard<std::mutex> lock(recipe_mutex_);
-      active_route_ = route;
-      recipe_route_.clear();
-      recipe_events_ = recipe_dropped_ = recipe_write_failures_ = recipe_missing_route_ = 0;
-      snapshot_events_ = snapshot_dropped_ = snapshot_write_failures_ = snapshot_missing_route_ = 0;
-      snapshot_active_ = false;
+    if (fault.reason != nullptr) {
+      std::fprintf(stderr, "[ui-export] recording_fault wall_ms=%llu reason=%s count=%llu errno=%d bytes=%llu limit=%llu service=%u\n",
+                   static_cast<unsigned long long>(fault.wall_ms), fault.reason,
+                   static_cast<unsigned long long>(fault.count), fault.error_number,
+                   static_cast<unsigned long long>(fault.bytes), static_cast<unsigned long long>(fault.limit),
+                   static_cast<unsigned>(fault.service_index));
+      continue;
     }
+    const std::string route = current_route_id();
+    if (!route.empty()) observe_route(route);
+    // Offroad UI traffic cannot extend a finalized drive or turn it into a
+    // damaged archive at the next ignition. Still observe the new route first,
+    // so future offers acquire its fresh epoch instead of remaining on the old one.
+    if (epoch && epoch->finalized) continue;
+    if (route.empty()) {
+      mark_route_damage(epoch, "route_unavailable");
+      // Startup has no owner yet. A transient missing parameter during an
+      // established drive must not clear that drive's integrity failures.
+      std::lock_guard<std::mutex> lock(recipe_mutex_);
+      if (!active_route_.empty()) {
+        auto& missing = has_snapshot ? snapshot_missing_route_ : recipe_missing_route_;
+        ++missing;
+        offer_recording_fault(has_snapshot ? "snapshot_route_unavailable" : "recipe_route_unavailable",
+                              missing, 0, 0, 0, has_snapshot ? snapshot.frame.service_index : kRecipeEventServiceIndex);
+      }
+      continue;
+    }
+    if (!epoch || epoch->generation != route_generation_) {
+      mark_route_damage(epoch, "route_transition_discarded");
+      std::lock_guard<std::mutex> lock(recipe_mutex_);
+      ++route_transition_discarded_;
+      offer_recording_fault("metadata_route_transition", route_transition_discarded_, 0, 0, 0,
+                            has_snapshot ? snapshot.frame.service_index : kRecipeEventServiceIndex);
+      continue;
+    }
+    if (epoch->damage_attempts != 0 && !epoch->damage_recorded) mark_route_damage(epoch, epoch->damage_reason);
     if (has_snapshot) {
       // CurrentRoute stays set after the drive, and the comma's UI keeps exporting while offroad.
       // A finished route's snapshot must stop growing, or the app's download of it (which checks
@@ -424,21 +602,36 @@ void SocketServer::recipe_writer_loop() {
         offroad_ = comma_offroad();
       }
       if (offroad_) {
+        // CurrentRoute can change before IsOffroad at startup. Only finalize
+        // an observed drive after any known damage is durable; pending marker
+        // writes must retain their bounded retries when storage recovers offroad.
+        epoch->finalized = epoch->onroad_observed &&
+            (epoch->damage_attempts == 0 || epoch->damage_recorded);
         if (snapshot_file_ != nullptr) {
           // Final for this route: openpilot starts a new route each time the car goes onroad.
           sync_and_close(snapshot_file_);
           snapshot_file_ = nullptr;
-          snapshot_route_.clear();
           std::lock_guard<std::mutex> lock(recipe_mutex_);
+          snapshot_route_.clear();
           snapshot_active_ = false;
         }
         continue;
       }
+      epoch->onroad_observed = true;
       if (snapshot_route_ != route || snapshot_file_ == nullptr) {
         if (snapshot_file_ != nullptr) sync_and_close(snapshot_file_);
-        snapshot_route_ = route;
         const std::string path = recipe_dir_ + "/ui-snapshot-" + route + ".jsonl";
         snapshot_file_ = std::fopen(path.c_str(), "a");
+        if (snapshot_file_ == nullptr) {
+          const int failure = errno;
+          std::lock_guard<std::mutex> lock(recipe_mutex_);
+          snapshot_route_ = route;
+          snapshot_active_ = false;
+          ++snapshot_write_failures_;
+          offer_recording_fault("snapshot_open_failed", snapshot_write_failures_, failure, 0, 0,
+                                snapshot.frame.service_index);
+          continue;
+        }
         if (snapshot_file_ != nullptr) {
           fchmod(fileno(snapshot_file_), 0600);
           struct stat info = {};
@@ -447,6 +640,7 @@ void SocketServer::recipe_writer_loop() {
         }
         {
           std::lock_guard<std::mutex> lock(recipe_mutex_);
+          snapshot_route_ = route;
           snapshot_active_ = snapshot_file_ != nullptr;
         }
       }
@@ -459,30 +653,42 @@ void SocketServer::recipe_writer_loop() {
       if (snapshot_bytes_ > kMaxSnapshotFileBytes - record.size()) {
         std::lock_guard<std::mutex> lock(recipe_mutex_);
         ++snapshot_dropped_;
+        offer_recording_fault("snapshot_file_limit", snapshot_dropped_, 0, snapshot_bytes_,
+                              kMaxSnapshotFileBytes, snapshot.frame.service_index);
         continue;
       }
       const bool written = snapshot_file_ != nullptr &&
           std::fwrite(record.data(), 1, record.size(), snapshot_file_) == record.size() &&
           std::fflush(snapshot_file_) == 0 &&
           ((snapshot_events_ + 1) % 20 != 0 || fdatasync(fileno(snapshot_file_)) == 0);
+      const int write_error = written ? 0 : errno;
       std::lock_guard<std::mutex> lock(recipe_mutex_);
       if (written) {
         ++snapshot_events_;
         snapshot_bytes_ += record.size();
       }
-      else ++snapshot_write_failures_;
+      else {
+        ++snapshot_write_failures_;
+        offer_recording_fault("snapshot_write_failed", snapshot_write_failures_, write_error,
+                              record.size(), 0, snapshot.frame.service_index);
+      }
       continue;
     }
     line.insert(1, "\"routeId\":\"" + route + "\",");
     const bool written = std::fwrite(line.data(), 1, line.size(), recipe_file_) == line.size() &&
                          std::fflush(recipe_file_) == 0 &&
                          fdatasync(fileno(recipe_file_)) == 0;
+    const int write_error = written ? 0 : errno;
     std::lock_guard<std::mutex> lock(recipe_mutex_);
     if (written) {
       ++recipe_events_;
       recipe_route_ = route;
     }
-    else ++recipe_write_failures_;
+    else {
+      ++recipe_write_failures_;
+      offer_recording_fault("recipe_write_failed", recipe_write_failures_, write_error, line.size(), 0,
+                            kRecipeEventServiceIndex);
+    }
   }
 }
 

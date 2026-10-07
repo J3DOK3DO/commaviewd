@@ -89,7 +89,7 @@ bool is_bare_literal(const std::string& v) {
 
 // ---- Keyed values
 
-enum class KeyKind { kNone, kGps, kVin, kSsid, kDeviceId, kSecret };
+enum class KeyKind { kNone, kGps, kVin, kSsid, kDeviceId, kSecret, kRecordingReference };
 
 KeyKind classify_key(const std::string& raw_key) {
   std::string key = lower_copy(raw_key);
@@ -101,6 +101,10 @@ KeyKind classify_key(const std::string& raw_key) {
   const size_t dot = key.find_last_of('.');
   const std::string leaf = dot == std::string::npos ? key : key.substr(dot + 1);
   if (leaf.empty()) return KeyKind::kNone;
+  for (const char* reference : {"route", "routeid", "route_id", "reciperoute", "snapshotroute", "metadataroute",
+                                "sessionid", "session_id", "sessionprefix"}) {
+    if (leaf == reference) return KeyKind::kRecordingReference;
+  }
   for (const char* gps : {"lat", "lon", "lng", "latitude", "longitude", "latitude_deg", "longitude_deg"}) {
     if (leaf == gps) return KeyKind::kGps;
   }
@@ -212,6 +216,9 @@ size_t redact_key_value(const std::string& s, size_t sep, std::string* out) {
     case KeyKind::kSecret:
       if (!quoted && is_bare_literal(value)) return 0;
       replacement = "redacted-secret";
+      break;
+    case KeyKind::kRecordingReference:
+      replacement = "redacted-recording-reference";
       break;
     case KeyKind::kNone:
       return 0;

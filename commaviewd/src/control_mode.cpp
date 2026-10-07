@@ -2211,7 +2211,9 @@ commaview::api::HttpResponse handle_source_recording_get(const commaview::api::H
     if (!is_onroad()) {
       return make_json(403, "{\"ok\":false,\"error\":\"onroad required\"}");
     }
-    return source_recording_current_response(read_param("CurrentRoute"));
+    const std::string route = read_param("CurrentRoute");
+    const std::string status = runtime_status_json();
+    return source_recording_preflight_response(route, status, read_param("CurrentRoute"), is_onroad());
   }
   // Finished drives are served offroad, or parked (in Park, at a standstill, not engaged): the app
   // only asks for segments the comma has finished writing. Never while the car is being driven.

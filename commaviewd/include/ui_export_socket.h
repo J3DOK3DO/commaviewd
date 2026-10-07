@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <deque>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -46,6 +47,11 @@ struct SocketStats {
   uint64_t snapshot_missing_route = 0;
   bool snapshot_active = false;
   std::string snapshot_route;
+  std::string metadata_route;
+  uint64_t route_generation = 0;
+  uint64_t route_transition_discarded = 0;
+  uint64_t recording_faults_suppressed = 0;
+  bool metadata_damaged = false;
 };
 
 std::string default_socket_path();
@@ -65,16 +71,51 @@ class SocketServer {
   std::string recipe_file_path() const;
 
  private:
+  friend struct RecordingMetadataTestAccess;
+  struct RouteEpoch {
+    std::string route;
+    uint64_t generation = 0;
+    bool damage_recorded = false; // Only the writer reads/writes this flag.
+    uint64_t damage_attempts = 0;
+    const char* damage_reason = nullptr;
+    bool onroad_observed = false; // Only the writer reads/writes the drive lifecycle flags.
+    bool finalized = false; // Offroad after onroad; later UI traffic is outside this drive.
+  };
+  struct RecipeRecord {
+    std::string line;
+    std::shared_ptr<RouteEpoch> epoch;
+  };
   struct SnapshotRecord {
     LatestFrame frame;
     uint64_t sequence = 0;
+    std::shared_ptr<RouteEpoch> epoch;
+  };
+  struct RecordingFault {
+    const char* reason = nullptr;
+    uint64_t count = 0;
+    int error_number = 0;
+    uint64_t bytes = 0;
+    uint64_t limit = 0;
+    uint8_t service_index = 0;
+    uint64_t wall_ms = 0;
+  };
+  struct FaultCounter {
+    const char* reason = nullptr;
+    int error_number = 0;
+    uint64_t count = 0;
   };
   void accept_loop();
   bool receive_one_frame(int client_fd);
   void mark_client_connected(bool connected);
   void offer_recipe_event(const LatestFrame& frame);
   void offer_snapshot(const LatestFrame& frame);
+  // Called with recipe_mutex_ held; only the writer thread emits these messages.
+  void offer_recording_fault(const char* reason, uint64_t count, int error_number,
+                             uint64_t bytes, uint64_t limit, uint8_t service_index);
   void recipe_writer_loop();
+  // Writer/startup only: parameter IO never runs in a frame callback.
+  void observe_route(const std::string& route);
+  void mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, const char* reason);
 
   std::string socket_path_;
   std::string recipe_dir_;
@@ -83,8 +124,16 @@ class SocketServer {
   std::thread recipe_thread_;
   mutable std::mutex recipe_mutex_;
   std::condition_variable recipe_condition_;
-  std::deque<std::string> recipe_queue_;
+  std::deque<RecipeRecord> recipe_queue_;
   std::deque<SnapshotRecord> snapshot_queue_;
+  std::deque<RecordingFault> recording_faults_;
+  std::array<FaultCounter, 32> recording_fault_counts_ = {};
+  uint64_t recording_faults_suppressed_ = 0;
+  uint64_t reported_faults_suppressed_ = 0;
+  uint64_t route_generation_ = 0;
+  std::shared_ptr<RouteEpoch> active_epoch_;
+  bool metadata_damaged_ = false;
+  uint64_t route_transition_discarded_ = 0;
   uint64_t snapshot_sequence_ = 0;
   std::array<uint64_t, kServiceCount> last_snapshot_offer_ms_ = {};
   FILE* snapshot_file_ = nullptr;

@@ -139,6 +139,30 @@ within 30 s. `POST /commaview/runtime/uninstall` (paired token; `runtime-uninsta
 queues the installed `uninstall.sh` the same way; it removes the API, its token and the queue with
 it.
 
+The authenticated `/commaview/source-recording/current` response includes `recordingStatus`
+and brackets status collection with fresh route/onroad checks. Existing clients still receive
+`routeId`; clients can use `metadataRoute` and `routeGeneration` to bind counters to that drive.
+Queued recipe/snapshot records carry the generation observed by the producer, so backlog from
+one route cannot become healthy metadata for another route. The writer discards stale records
+and marks the old route damaged in a synced private `ui-invalid-<route>` sidecar and a recipe
+fault row. Once the writer observes an onroad drive going offroad and finalizes it, subsequent UI traffic for
+that drive is ignored; it cannot mark a healthy completed archive damaged at the next ignition.
+A new route refreshes the cached road state before accepting snapshots; a startup offroad
+flag cannot finalize a drive that has not yet been observed onroad. A missing route
+parameter during an established drive preserves its counters and
+marks damage; initial startup waits for a known route. The sidecar restores `metadataDamaged`
+after restart, and archive endpoints return 409 for that route. Original comma segments are
+never removed by this processing. Other integrity counters still reset on a new route/restart.
+Pending damage-marker writes keep their bounded retries offroad until the damage is durable.
+
+Technical recording faults use the existing persistent logger from the metadata writer.
+The eight-entry queue and 32 fixed reason/errno counters emit occurrences 1, 2, 4, 8, etc.
+independently per cause, prefer a new first cause over a queued repeat, and report suppression
+in `recordingFaultsSuppressed` and coalesced overflow messages. No additional frame-path disk
+IO or periodic logging is introduced. Support exports redact recording identifiers as well as
+the existing sensitive keys. `test_recording_metadata` exercises the actual producer/writer
+without sockets; the separate socket integration and complete local matrix remain required.
+
 Recording records let every paired device make a replay of a recording another one made (the car's
 head unit records, a phone at home makes the replay). A recording is a small JSON journal (which
 drive, which interval, which look) and a thumbnail; the drive itself is the comma's own. A paired

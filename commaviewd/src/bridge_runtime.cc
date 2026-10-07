@@ -468,6 +468,11 @@ static std::string build_runtime_stats_json_locked() {
     out << ",\"snapshotDropped\":" << socket_stats.snapshot_dropped;
     out << ",\"snapshotWriteFailures\":" << socket_stats.snapshot_write_failures;
     out << ",\"snapshotMissingRoute\":" << socket_stats.snapshot_missing_route;
+    out << ",\"metadataRoute\":\"" << socket_stats.metadata_route << "\"";
+    out << ",\"routeGeneration\":" << socket_stats.route_generation;
+    out << ",\"routeTransitionDiscarded\":" << socket_stats.route_transition_discarded;
+    out << ",\"recordingFaultsSuppressed\":" << socket_stats.recording_faults_suppressed;
+    out << ",\"metadataDamaged\":" << (socket_stats.metadata_damaged ? "true" : "false");
     out << "}";
   }
   out << "}";
