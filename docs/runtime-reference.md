@@ -38,6 +38,13 @@ framing, freshness, and diagnostic markers.
 | `8202` | TCP | Driver camera. |
 | `8203` | TCP | Telemetry. |
 
+Each camera port streams to one client at a time. A client reconnecting from the address that
+holds a camera replaces its earlier connection; a client from another address is turned away
+(`client_rejected` in `runtime-run-events.jsonl`) until the camera is free. The bridge sets TCP
+keepalive and `TCP_USER_TIMEOUT` on every stream connection, so a client that vanished without
+closing it (out of Wi-Fi range, powered off, moved to another network) frees its camera within
+about ten seconds.
+
 The discovery response, `/commaview/version`, and `/commaview/status` include `deviceType`
 (`tizi`, `mici`, `tici`, or empty if unknown). The app uses it to distinguish comma hardware.
 
