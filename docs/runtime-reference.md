@@ -144,11 +144,11 @@ normally fetches its matching scripts; using a moving source ref is a developmen
 
 | Variable | Purpose |
 | --- | --- |
-| `COMMAVIEWD_RELEASE_REPO` | Release repository; default `RhynoTech/commaviewd`. |
+| `COMMAVIEWD_RELEASE_REPO` | Release repository; default `CommaView/commaviewd` (`RhynoTech/commaviewd`, its previous name, works the same). |
 | `COMMAVIEWD_RELEASE_TAG` | Explicit release tag. |
 | `COMMAVIEWD_DEFAULT_TAG` | Default tag before network lookup. |
 | `COMMAVIEWD_CURRENT_RELEASE_URL` | Current-release lookup; default `https://commaview.com/api/current-release` for this release repository. Other repositories skip it unless explicitly set. |
-| `COMMAVIEWD_RELEASES_API_URL` | GitHub releases API for the newest-release fallback. |
+| `COMMAVIEWD_RELEASES_API_URL` | GitHub releases API used when the current-release lookup fails: the newest beta by version, never an alpha (another repository: its newest release). With neither, the install stops and changes nothing. The shim reads it too. |
 | `COMMAVIEWD_RELEASES_ORIGIN` | Hosted release origin; default `https://commaview.com/commaviewd`. |
 | `COMMAVIEWD_INSTALLER_REF` | Companion script ref; default resolved release tag. |
 | `COMMAVIEWD_ASSET_NAME` | Bundle filename override. |
