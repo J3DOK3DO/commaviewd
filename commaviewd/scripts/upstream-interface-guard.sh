@@ -73,7 +73,7 @@ remote="$(git -C "$OP_ROOT" remote get-url origin 2>/dev/null || true)"
 onroad_ui_export_flavor="openpilot"
 if printf '%s' "$remote" | grep -qi 'sunnypilot'; then
   onroad_ui_export_flavor="sunnypilot"
-elif printf '%s' "$remote" | grep -qi 'firestar5683/StarPilot'; then
+elif printf '%s' "$remote" | grep -qiE 'firestar5683/(starpilot|openpilot)'; then
   onroad_ui_export_flavor="starpilot"
 fi
 

@@ -1,7 +1,12 @@
 #include "drive_retention.h"
+#include "openpilot_log_root.h"
 
 #include <cassert>
+#include <cstdio>
+#include <fstream>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 using commaview::runtime::deletion_order;
@@ -9,6 +14,7 @@ using commaview::runtime::delete_below_bytes;
 using commaview::runtime::DiskSpace;
 using commaview::runtime::drive_retention_json;
 using commaview::runtime::drive_retention_response;
+using commaview::runtime::openpilot_log_root;
 using commaview::runtime::SegmentDir;
 
 namespace {
@@ -91,5 +97,24 @@ int main() {
   std::string many = "/commaview/drive-retention?routes=";
   for (int i = 0; i < 301; ++i) many += (i ? "," : "") + std::string("a--b");
   assert(drive_retention_response(many).status == 400);
+
+  // StarPilot's High Bitrate Recording and Konik markers move the log root (hw.py), only under StarPilot.
+  char tmpl[] = "/tmp/commaview-log-root-XXXXXX";
+  const std::string tmp = mkdtemp(tmpl);
+  const std::string op = tmp + "/openpilot", cache = tmp + "/cache", media = tmp + "/media";
+  assert(mkdir(op.c_str(), 0755) == 0 && mkdir(cache.c_str(), 0755) == 0);
+  std::ofstream(cache + "/use_konik").put('1');
+  assert(openpilot_log_root(op, cache, media) == media + "/realdata");  // markers left by StarPilot
+  assert(mkdir((op + "/starpilot").c_str(), 0755) == 0);
+  assert(openpilot_log_root(op, cache, media) == media + "/realdata_konik");
+  std::ofstream(cache + "/use_HD").put('1');
+  assert(openpilot_log_root(op, cache, media) == media + "/realdata_HD");
+  std::remove((cache + "/use_HD").c_str());
+  std::remove((cache + "/use_konik").c_str());
+  assert(openpilot_log_root(op, cache, media) == media + "/realdata");
+  rmdir((op + "/starpilot").c_str());
+  rmdir(op.c_str());
+  rmdir(cache.c_str());
+  rmdir(tmp.c_str());
   return 0;
 }

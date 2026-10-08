@@ -227,3 +227,19 @@ def test_an_unregistered_comma_does_not_ask(stats):
 def test_the_command_line_needs_a_drives_length(stats):
   with pytest.raises(SystemExit):
     stats.main(["after-drive", "--route", ROUTE])
+
+
+def test_starpilot_markers_move_the_log_root_only_under_starpilot(stats, tmp_path):
+  op, cache, media = tmp_path / "openpilot", tmp_path / "cache", tmp_path / "media"
+  op.mkdir()
+  cache.mkdir()
+  (cache / "use_konik").write_text("1")
+
+  def root():
+    return stats.openpilot_log_root(str(op), str(cache), str(media))
+
+  assert root() == str(media / "realdata")  # markers left behind by StarPilot
+  (op / "starpilot").mkdir()
+  assert root() == str(media / "realdata_konik")
+  (cache / "use_HD").write_text("1")  # hw.py checks High Bitrate Recording first
+  assert root() == str(media / "realdata_HD")

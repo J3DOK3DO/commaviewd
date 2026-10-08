@@ -1046,3 +1046,21 @@ def test_starpilot_widths_and_logging_status():
   assert state["laneLineHalfWidthM"] == 0.05
   assert state["roadEdgeHalfWidthM"] == 0.1
   assert "Disable Logging" in state["videoDisabledReason"]
+
+
+def test_starpilot_color_failure_keeps_the_onroad_payload(monkeypatch):
+  module = load_exporter(REPO_ROOT / "comma/src/commaview_export.starpilot.py")
+  exporter = module._CommaViewSocketExporter("STARPILOT", start_worker=False)
+  status = types.ModuleType("openpilot.selfdrive.ui.lib.starpilot_status")
+  def fail(_state):
+    raise RuntimeError("capnp read failed")
+  status.get_border_color = status.get_screen_edge_color = fail
+  monkeypatch.setitem(sys.modules, "openpilot.selfdrive.ui.lib.starpilot_status", status)
+  ui = FakeUiState({})
+  ui.started = ui.ignition = True
+  ui.is_metric = True
+  ui.status = "disengaged"
+  ui.always_on_lateral_active = False
+  state = exporter._ui_state_onroad_payload(ui)["starpilot"]
+  assert state["borderColor"] == state["screenEdgeColor"] == 0xFF122839
+  assert "modeBanner" not in state  # StarPilot shows its modes only as colors

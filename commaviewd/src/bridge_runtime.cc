@@ -786,19 +786,17 @@ static void handle_video_client(int client_fd, const char* video_service, int po
   // The session starts at the newest message.
   // Event wire ordinals and EncodeData layouts stayed the same when upstream renamed the
   // road/driver services to narrowRoad/cabin. StarPilot still publishes the older names.
-  std::string alternate_service = video_service;
   const std::pair<const char*, const char*> aliases[] = {
     {"narrowRoadEncodeData", "roadEncodeData"}, {"cabinEncodeData", "driverEncodeData"},
     {"livestreamNarrowRoadEncodeData", "livestreamRoadEncodeData"},
     {"livestreamCabinEncodeData", "livestreamDriverEncodeData"},
   };
+  std::vector<std::string> alternate_queues;  // wideRoad kept its name
   for (const auto& alias : aliases) {
-    if (alternate_service == alias.first) { alternate_service = alias.second; break; }
-    if (alternate_service == alias.second) { alternate_service = alias.first; break; }
+    if (std::strcmp(video_service, alias.first) == 0) alternate_queues.push_back(commaview::ipc::msgq_queue_path(alias.second));
+    if (std::strcmp(video_service, alias.second) == 0) alternate_queues.push_back(commaview::ipc::msgq_queue_path(alias.first));
   }
-  commaview::ipc::QueueStreamReader video_reader(
-      commaview::ipc::msgq_queue_path(video_service),
-      {commaview::ipc::msgq_queue_path(alternate_service)});
+  commaview::ipc::QueueStreamReader video_reader(commaview::ipc::msgq_queue_path(video_service), alternate_queues);
   std::vector<uint8_t> raw_msg;
   uint64_t ring_discontinuities = 0;
 

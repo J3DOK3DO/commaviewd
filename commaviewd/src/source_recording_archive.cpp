@@ -1,5 +1,7 @@
 #include "source_recording_archive.h"
 
+#include "openpilot_log_root.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -81,9 +83,9 @@ int open_file_at(int dir, const char* name) {
   return ::openat(dir, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 }
 
-const char* archive_root() {
+std::string archive_root() {
   const char* override_root = std::getenv("COMMAVIEWD_SOURCE_ARCHIVE_ROOT");
-  return override_root && override_root[0] ? override_root : "/data/media/0/realdata";
+  return override_root && override_root[0] ? override_root : openpilot_log_root();
 }
 
 const char* recipe_root() {
@@ -116,7 +118,7 @@ HttpResponse range_response(const std::map<std::string, std::string>& q) {
     ::close(root);
   } else {
     const std::string segment_name = q.at("route") + "--" + std::to_string(segment);
-    const int root = open_directory(archive_root());
+    const int root = open_directory(archive_root().c_str());
     if (root < 0) return error(404, "archive unavailable");
     const int dir = open_directory_at(root, segment_name.c_str());
     ::close(root);
@@ -235,7 +237,7 @@ HttpResponse manifest_response(const std::map<std::string, std::string>& q) {
   if (q.size() != 1 || !q.count("route") || !safe_route(q.at("route"))) {
     return error(400, "invalid route");
   }
-  const int root = open_directory(archive_root());
+  const int root = open_directory(archive_root().c_str());
   if (root < 0) return error(404, "archive unavailable");
   DIR* listing = ::fdopendir(root);
   if (!listing) {
