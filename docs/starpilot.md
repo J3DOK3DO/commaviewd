@@ -12,8 +12,9 @@ narrowRoad/cabin encoder queue names without subscribing or taking a msgq reader
 follows whichever of the two was opened most recently. Wire service IDs are unchanged; StarPilot
 UI fields are nested in JSON uiStateOnroad.
 
-For the first alpha test, use runtime `v0.0.58-alpha.1` with Android app
-`app-v0.0.162-alpha.1`. The existing beta app does not select alpha runtime offers.
+Runtime `v0.0.58-alpha.1` with Android app `app-v0.0.162-alpha.1` was the first alpha pair, but
+it doesn't recognize the remote a normal StarPilot install has; test with the next alpha pair built
+with the remote fix. The existing beta app does not select alpha runtime offers.
 
 The Android companion needs the matching StarPilot overlay change. It receives explicit
 lateral-only/longitudinal-only states, resolved border and screen-edge colors, camera
