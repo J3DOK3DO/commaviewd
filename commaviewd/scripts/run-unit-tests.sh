@@ -55,6 +55,11 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   -o "$TMP/test_net_framing"
 
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
+  "$ROOT/tests/test_stream_slot.cpp" \
+  "$ROOT/src/socket.cpp" \
+  -o "$TMP/test_stream_slot"
+
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
   "$ROOT/tests/test_runtime_mode.cpp" \
   "$ROOT/src/mode.cpp" \
   -o "$TMP/test_runtime_mode"
@@ -193,6 +198,7 @@ fi
   "${MSGQ_ZMQ_SRCS[@]}" -lpthread -o "$TMP/test_msgq_ring_reader"
 
 "$TMP/test_net_framing"
+"$TMP/test_stream_slot"
 "$TMP/test_runtime_mode"
 "$TMP/test_control_policy"
 "$TMP/test_telemetry_policy"

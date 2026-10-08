@@ -22,6 +22,20 @@ to interpret.
 If this succeeds but the app cannot connect, investigate network reachability and pairing.
 If it fails, inspect the runtime logs listed below. See the [port reference](runtime-reference.md#network-ports).
 
+## Live view keeps reconnecting
+
+The app reaches the comma but no video arrives. Check these in the support report's
+`commaviewd-bridge.log` and `runtime-run-events.jsonl`:
+
+| What the logs show | Meaning |
+| --- | --- |
+| `client rejected: <ip> (the camera is streaming to <other ip>)` | Another device has that camera open. Close live view there. |
+| `client connected` and then nothing for that client | No camera video: openpilot is offroad, or encoderd isn't running. |
+| `peer disconnect phase=video_chunk_send` | The network can't carry the video; look at `videoSend` in the status statistics. |
+
+A comma 3X streams 1928×1208 video at about 10 Mbit/s per camera, twice a comma four's, so a
+weak Wi-Fi link that carries a comma four can fall short with a 3X.
+
 ## Video works but overlays are missing
 
 Check `/commaview/status` in this order:
