@@ -181,7 +181,7 @@ grep -Fq 'self._commaview_exporter = _CommaViewSocketExporter(COMMAVIEW_RUNTIME_
 grep -Fq 'self._commaview_exporter.publish(self)' "$TRANSFORMER" || fail "transformer missing exporter publish marker"
 grep -Fq 'self._update_commaview_camera_export()' "$TRANSFORMER" || fail "transformer missing onroad camera relay call marker"
 grep -Fq 'def _update_commaview_camera_export(self):' "$TRANSFORMER" || fail "transformer missing onroad camera relay helper marker"
-grep -Fq 'active_camera="wideRoad" if self.stream_type == WIDE_CAM else "road"' "$TRANSFORMER" || fail "transformer missing stream-type camera relay mapping"
+grep -Fq '"wideRoad" if self.stream_type == WIDE_CAM else "road"' "$TRANSFORMER" || fail "transformer missing stream-type camera relay mapping"
 grep -Fq 'active_camera="wideRoad" if is_wide_camera else "road"' "$TRANSFORMER" || fail "transformer missing wide onroad projection camera mapping"
 grep -Fq 'cloudlog.exception("commaview ui export publish failed")' "$TRANSFORMER" || fail "transformer missing publish guardrail"
 grep -Fq 'parser.add_argument("--platform", default="auto", choices=PLATFORM_CHOICES)' "$TRANSFORMER" || fail "transformer missing platform argument"

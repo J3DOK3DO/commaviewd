@@ -702,6 +702,7 @@ def prepare_lifecycle_install_dir(tmp_path: Path, op_root: Path) -> Path:
     shutil.copy2(REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh", install_dir / "scripts" / "verify_onroad_ui_export_patch.sh")
     shutil.copy2(OPENPILOT_TEMPLATE, install_dir / "src" / "commaview_export.openpilot.py")
     shutil.copy2(SUNNYPILOT_TEMPLATE, install_dir / "src" / "commaview_export.sunnypilot.py")
+    shutil.copy2(REPO_ROOT / "comma/src/commaview_export.starpilot.py", install_dir / "src/commaview_export.starpilot.py")
     (install_dir / "config" / "onroad-ui-export-patch.env").write_text(
         f"ONROAD_UI_EXPORT_FLAVOR=openpilot\nONROAD_UI_EXPORT_OP_ROOT={op_root}\n"
     )
@@ -1486,3 +1487,17 @@ def test_verify_without_car_params_reports_no_car(tmp_path):
     verify = REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh"
     status = json.loads(run_lifecycle_script(verify, install_dir, op_root, "--json", COMMAVIEWD_TEST_PARAMS_DIR=str(tmp_path / "none")).stdout)
     assert "carFingerprint" not in status
+
+
+@pytest.mark.parametrize("remote", ["https://github.com/firestar5683/StarPilot.git", "git@github.com:firestar5683/StarPilot.git"])
+def test_apply_and_verify_starpilot_remote(tmp_path, remote):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert result.returncode == 0, result.stderr
+    assert "ONROAD_UI_EXPORT_FLAVOR=starpilot" in (install_dir / "config/onroad-ui-export-patch.env").read_text()
+    result = run_lifecycle_script(REPO_ROOT / "comma/scripts/verify_onroad_ui_export_patch.sh", install_dir, op_root, "--json")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["flavor"] == "starpilot"

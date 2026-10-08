@@ -225,6 +225,7 @@ remote_flavor() {
   case "$remote" in
     *github.com:commaai/openpilot|*github.com/commaai/openpilot) printf '%s\n' openpilot ;;
     *github.com:sunnypilot/sunnypilot|*github.com/sunnypilot/sunnypilot|*github.com:sunnypilot/openpilot|*github.com/sunnypilot/openpilot) printf '%s\n' sunnypilot ;;
+    *github.com:firestar5683/StarPilot|*github.com/firestar5683/StarPilot) printf '%s\n' starpilot ;;
     *) return 1 ;;
   esac
 }
@@ -245,7 +246,7 @@ detect_flavor() {
   if [ -z "$preferred" ]; then
     state_flavor="$(state_value ONROAD_UI_EXPORT_FLAVOR || true)"
     state_op_root="$(state_value ONROAD_UI_EXPORT_OP_ROOT || true)"
-    if [ "$state_op_root" = "$OP_ROOT" ] && { [ "$state_flavor" = "openpilot" ] || [ "$state_flavor" = "sunnypilot" ]; }; then
+    if [ "$state_op_root" = "$OP_ROOT" ] && { [ "$state_flavor" = "openpilot" ] || [ "$state_flavor" = "sunnypilot" ] || [ "$state_flavor" = "starpilot" ]; }; then
       preferred="$state_flavor"
     fi
   fi
@@ -424,6 +425,8 @@ else
   expected_runtime_flavor="OPENPILOT"
   if [ "$flavor" = "sunnypilot" ]; then
     expected_runtime_flavor="SUNNYPILOT"
+  elif [ "$flavor" = "starpilot" ]; then
+    expected_runtime_flavor="STARPILOT"
   fi
 
   [ -f "$HELPER_PATH" ] && helper_present=true || true
@@ -455,7 +458,8 @@ else
     fi
     if ! { check_fixed 'self._update_commaview_camera_export()' "$augmented_road_path" && \
       check_fixed 'def _update_commaview_camera_export(self):' "$augmented_road_path" && \
-      check_fixed 'active_camera="wideRoad" if self.stream_type == WIDE_CAM else "road"' "$augmented_road_path"; }; then
+      { check_fixed 'active_camera="wideRoad" if self.stream_type == WIDE_CAM else "road"' "$augmented_road_path" ||
+        { [ "$flavor" = "starpilot" ] && check_fixed 'active_camera="none" if self._camera_view() == CAMERA_VIEW_NONE else "driver" if self.stream_type == DRIVER_CAM else "wideRoad" if self.stream_type == WIDE_CAM else "road"' "$augmented_road_path"; }; }; }; then
       onroad_camera_relay_present=false
     fi
     if ! { check_fixed 'model_transform = video_transform @ calib_transform' "$augmented_road_path" && \
@@ -492,6 +496,9 @@ else
 
   risk_fields_present=true
   for marker in "${risk_markers[@]}"; do
+    if [ "$flavor" = "starpilot" ] && [ "$marker" = 'def set_onroad_camera(self, active_camera: str, wide_camera_available: bool) -> None:' ]; then
+      marker='def set_onroad_camera(self, active_camera: str, wide_camera_available: bool, driver_video_frame_matrix=None) -> None:'
+    fi
     if ! check_fixed "$marker" "$HELPER_PATH"; then
       risk_fields_present=false
       break

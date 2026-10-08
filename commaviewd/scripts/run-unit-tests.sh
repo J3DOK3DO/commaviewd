@@ -175,6 +175,11 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
   "$DIST_DIR/msgq-commaviewd.cc" \
   -lpthread -o "$TMP/test_msgq_header_recovery"
 
+MSGQ_ZMQ_SRCS=()
+if grep -q 'ZMQContext' "$MSGQ_ROOT_DIR/msgq/ipc.cc"; then
+  MSGQ_ZMQ_SRCS+=("$MSGQ_ROOT_DIR/msgq/impl_zmq.cc" -lzmq)
+fi
+
 # Real msgq (commaviewd's linked copy) on private queues: the encoder queues are read without a
 # reader slot, so no number of bridge restarts or reconnects can evict loggerd.
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" -I"$ROOT/src" -I"$MSGQ_ROOT_DIR" \
@@ -184,7 +189,7 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
   "$DIST_DIR/msgq-commaviewd.cc" \
   "$MSGQ_ROOT_DIR/msgq/impl_msgq.cc" "$MSGQ_ROOT_DIR/msgq/ipc.cc" \
   "$MSGQ_ROOT_DIR/msgq/event.cc" "$MSGQ_ROOT_DIR/msgq/impl_fake.cc" \
-  -lpthread -o "$TMP/test_msgq_ring_reader"
+  "${MSGQ_ZMQ_SRCS[@]}" -lpthread -o "$TMP/test_msgq_ring_reader"
 
 "$TMP/test_net_framing"
 "$TMP/test_runtime_mode"

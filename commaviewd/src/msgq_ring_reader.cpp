@@ -57,7 +57,8 @@ std::string msgq_queue_path(const std::string& service) {
   return base + service;
 }
 
-RingMap::RingMap(std::string path) : path_(std::move(path)) {}
+RingMap::RingMap(std::string path, std::vector<std::string> alternate_paths)
+    : path_(std::move(path)), alternate_paths_(std::move(alternate_paths)) {}
 
 RingMap::~RingMap() {
   unmap();
@@ -75,7 +76,26 @@ void RingMap::unmap() {
 bool RingMap::refresh(bool* remapped) {
   if (remapped != nullptr) *remapped = false;
   struct stat st {};
-  if (stat(path_.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+  auto usable = [](const std::string& path, struct stat* info) {
+    return stat(path.c_str(), info) == 0 && S_ISREG(info->st_mode) && info->st_size > 0 &&
+           ring_layout_for_file_size(static_cast<size_t>(info->st_size)).has_value();
+  };
+  bool found = usable(path_, &st);
+  if (!found || mem_ == nullptr) {
+    for (auto& alternate : alternate_paths_) {
+      struct stat candidate {};
+      if (usable(alternate, &candidate) && (!found ||
+          candidate.st_mtim.tv_sec > st.st_mtim.tv_sec ||
+          (candidate.st_mtim.tv_sec == st.st_mtim.tv_sec && candidate.st_mtim.tv_nsec > st.st_mtim.tv_nsec))) {
+        // Queue files can survive a fork change. On first mapping prefer the encoder queue
+        // opened most recently, then keep following it for this session. Never create a queue.
+        std::swap(path_, alternate);
+        st = candidate;
+        found = true;
+      }
+    }
+  }
+  if (!found) {
     if (mem_ != nullptr && remapped != nullptr) *remapped = true;
     unmap();
     return false;
@@ -112,6 +132,9 @@ int64_t RingMap::size_tag_at(uint64_t offset) const {
 
 QueueStreamReader::QueueStreamReader(std::string path, int idle_poll_us)
     : ring_(std::move(path)), idle_poll_us_(std::max(idle_poll_us, 100)) {}
+
+QueueStreamReader::QueueStreamReader(std::string path, std::vector<std::string> alternate_paths, int idle_poll_us)
+    : ring_(std::move(path), std::move(alternate_paths)), idle_poll_us_(std::max(idle_poll_us, 100)) {}
 
 void QueueStreamReader::restart() {
   cursor_valid_ = false;

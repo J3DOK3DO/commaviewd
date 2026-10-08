@@ -13,5 +13,7 @@
   {"name": "sunnypilot-release-tizi-staging", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "release-tizi-staging", "ui_platform": "tizi"},
   {"name": "sunnypilot-staging-chestnut-mici", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "staging-chestnut", "ui_platform": "mici"},
   {"name": "sunnypilot-staging-chestnut-tizi", "upstream_repo": "sunnypilot/sunnypilot", "upstream_ref": "staging-chestnut", "ui_platform": "tizi"},
-  {"name": "sunnypilot-release-pin", "upstream_repo": "sunnypilot/openpilot", "upstream_ref": "release-pin", "ui_platform": "mici", "description": "the sunnypilot commit releases build from (ci/upstream-refs.env): a sunnypilot staging commit, chosen for the video msgq header recovery"}
+  {"name": "sunnypilot-release-pin", "upstream_repo": "sunnypilot/openpilot", "upstream_ref": "release-pin", "ui_platform": "mici", "description": "the sunnypilot commit releases build from (ci/upstream-refs.env): a sunnypilot staging commit, chosen for the video msgq header recovery"},
+  {"name": "starpilot-pinned-mici", "upstream_repo": "firestar5683/StarPilot", "upstream_ref": "2a12dbd0ad94b46f8a7b6099d32d7216b7676f79", "ui_platform": "mici"},
+  {"name": "starpilot-pinned-tizi", "upstream_repo": "firestar5683/StarPilot", "upstream_ref": "2a12dbd0ad94b46f8a7b6099d32d7216b7676f79", "ui_platform": "tizi"}
 ]

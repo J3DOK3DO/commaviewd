@@ -67,6 +67,7 @@ required_stage_files=(
   "scripts/smoke_onroad_ui_export_helper.py"
   "src/commaview_export.openpilot.py"
   "src/commaview_export.sunnypilot.py"
+  "src/commaview_export.starpilot.py"
   "src/commaview_drive_stats.py"
 )
 
@@ -142,6 +143,7 @@ install -m 755 "${ROOT}/comma/scripts/transform_onroad_ui_export.py" "${STAGE_DI
 install -m 755 "${ROOT}/comma/scripts/smoke_onroad_ui_export_helper.py" "${STAGE_DIR}/scripts/smoke_onroad_ui_export_helper.py"
 install -m 644 "${ROOT}/comma/src/commaview_export.openpilot.py" "${STAGE_DIR}/src/commaview_export.openpilot.py"
 install -m 644 "${ROOT}/comma/src/commaview_export.sunnypilot.py" "${STAGE_DIR}/src/commaview_export.sunnypilot.py"
+install -m 644 "${ROOT}/comma/src/commaview_export.starpilot.py" "${STAGE_DIR}/src/commaview_export.starpilot.py"
 install -m 644 "${ROOT}/comma/src/commaview_drive_stats.py" "${STAGE_DIR}/src/commaview_drive_stats.py"
 
 wheel_path="${OUT_DIR}/${ORJSON_WHEEL_FILENAME}"

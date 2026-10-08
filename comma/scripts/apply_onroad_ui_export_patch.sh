@@ -601,6 +601,7 @@ remote_flavor() {
   case "$remote" in
     *github.com:commaai/openpilot|*github.com/commaai/openpilot) printf '%s\n' openpilot ;;
     *github.com:sunnypilot/sunnypilot|*github.com/sunnypilot/sunnypilot|*github.com:sunnypilot/openpilot|*github.com/sunnypilot/openpilot) printf '%s\n' sunnypilot ;;
+    *github.com:firestar5683/StarPilot|*github.com/firestar5683/StarPilot) printf '%s\n' starpilot ;;
     *) return 1 ;;
   esac
 }
@@ -617,7 +618,7 @@ detect_flavor() {
   else
     state_flavor="$(state_value ONROAD_UI_EXPORT_FLAVOR || true)"
     state_op_root="$(state_value ONROAD_UI_EXPORT_OP_ROOT || true)"
-    if [ "$state_op_root" = "$OP_ROOT" ] && { [ "$state_flavor" = "openpilot" ] || [ "$state_flavor" = "sunnypilot" ]; }; then
+    if [ "$state_op_root" = "$OP_ROOT" ] && { [ "$state_flavor" = "openpilot" ] || [ "$state_flavor" = "sunnypilot" ] || [ "$state_flavor" = "starpilot" ]; }; then
       preferred="$state_flavor"
     fi
   fi
@@ -630,7 +631,7 @@ detect_flavor() {
 }
 
 flavor="$(detect_flavor)" || {
-  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot and sunnypilot remotes" >&2
+  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot and sunnypilot and firestar5683/StarPilot remotes" >&2
   exit 1
 }
 ui_platform="$(detect_ui_platform "$REQUESTED_UI_PLATFORM")" || {

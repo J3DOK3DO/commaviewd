@@ -677,6 +677,7 @@ required_files=(
   "scripts/run_when_offroad.sh"
   "src/commaview_export.openpilot.py"
   "src/commaview_export.sunnypilot.py"
+  "src/commaview_export.starpilot.py"
   "src/commaview_drive_stats.py"
 )
 
@@ -752,6 +753,7 @@ deploy_required_scripts() {
   rm -f "$INSTALL_DIR/scripts/commaview_export_worker.py"
   copy_required_file "src/commaview_export.openpilot.py" "$INSTALL_DIR/src/commaview_export.openpilot.py" 644
   copy_required_file "src/commaview_export.sunnypilot.py" "$INSTALL_DIR/src/commaview_export.sunnypilot.py" 644
+  copy_required_file "src/commaview_export.starpilot.py" "$INSTALL_DIR/src/commaview_export.starpilot.py" 644
   copy_required_file "src/commaview_drive_stats.py" "$INSTALL_DIR/src/commaview_drive_stats.py" 644
   copy_required_file "stop.sh" "$INSTALL_DIR/stop.sh"
   copy_required_file "uninstall.sh" "$INSTALL_DIR/uninstall.sh"

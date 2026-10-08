@@ -5,6 +5,7 @@
 //
 // --cpu-bench IDLE_POLL_US SECONDS measures what the polling costs: three queues published at
 // 20 Hz like encoderd's, one reader thread each, and the readers' own CPU time.
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -531,9 +532,47 @@ int cpu_bench(int idle_poll_us, int seconds) {
 
 }  // namespace
 
+// Alias discovery also works when the client connects before the encoder starts.
+static void test_late_encoder_alias() {
+  TestQueue preferred("preferred"), alternate("legacy");
+  QueueStreamReader reader(preferred.path, {alternate.path});
+  std::vector<uint8_t> out;
+  bool gap = false;
+  CHECK(reader.try_next(&out, &gap) == ReadStatus::kUnavailable);
+  std::unique_ptr<Context> ctx(Context::create());
+  auto publisher = make_publisher(ctx.get(), alternate.endpoint);
+  Header header(alternate.endpoint, kRingSize);
+  const auto untouched = header.slots();
+  CHECK(reader.try_next(&out, &gap) == ReadStatus::kEmpty);
+  publish(publisher.get(), "StarPilot frame");
+  CHECK(reader.next(50, &out, &gap));
+  CHECK(text_of(out) == "StarPilot frame");
+  CHECK(reader.path() == alternate.path);
+  CHECK(header.slots() == untouched);
+}
+
+static void test_stale_preferred_queue_does_not_mask_fork_alias() {
+  TestQueue preferred("old_fork"), alternate("active_fork");
+  std::unique_ptr<Context> ctx(Context::create());
+  auto old_publisher = make_publisher(ctx.get(), preferred.endpoint);
+  auto active_publisher = make_publisher(ctx.get(), alternate.endpoint);
+  const timespec old_time[2] = {{1, 0}, {1, 0}};
+  CHECK(utimensat(AT_FDCWD, preferred.path.c_str(), old_time, 0) == 0);
+  QueueStreamReader reader(preferred.path, {alternate.path});
+  std::vector<uint8_t> out;
+  bool gap = false;
+  CHECK(reader.try_next(&out, &gap) == ReadStatus::kEmpty);
+  publish(active_publisher.get(), "active fork");
+  CHECK(reader.next(50, &out, &gap));
+  CHECK(text_of(out) == "active fork");
+  CHECK(reader.path() == alternate.path);
+}
+
 int main(int argc, char** argv) {
   unsetenv("OPENPILOT_PREFIX");
   if (argc == 4 && std::string(argv[1]) == "--cpu-bench") return cpu_bench(std::atoi(argv[2]), std::atoi(argv[3]));
+  test_stale_preferred_queue_does_not_mask_fork_alias();
+  test_late_encoder_alias();
   test_layout_from_file_size();
   test_subscriber_per_restart_evicts_loggerd();
   test_restarts_and_reconnects_never_touch_loggerd();

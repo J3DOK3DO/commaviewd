@@ -174,6 +174,13 @@ COMMON_SRCS=(
   "$DEPRECATED_SCHEMA_CPP" "$OP_SOURCE_ROOT/cereal/gen/cpp/custom.capnp.c++"
 )
 
+# Older forks (including StarPilot) keep the ZMQ wrappers in a separate source file.
+# Current upstream removed them. Both layouts use the same installed libzmq.
+if grep -q 'ZMQContext' "$MSGQ_ROOT/msgq/ipc.cc"; then
+  require_file "$MSGQ_ROOT/msgq/impl_zmq.cc"
+  COMMON_SRCS+=("$MSGQ_ROOT/msgq/impl_zmq.cc")
+fi
+
 echo "[2/5] Building host sanity binary (x86_64)..."
 "$HOST_CXX" -O2 -std=c++17 -DCOMMAVIEW_BRIDGE_NO_MAIN \
   "${VIDEO_SCHEMA_FLAGS[@]}" \

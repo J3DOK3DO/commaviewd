@@ -52,7 +52,7 @@ std::string msgq_queue_path(const std::string& service);
 // A msgq queue file mapped read-only. Never creates, resizes or writes it.
 class RingMap {
  public:
-  explicit RingMap(std::string path);
+  explicit RingMap(std::string path, std::vector<std::string> alternate_paths = {});
   ~RingMap();
   RingMap(const RingMap&) = delete;
   RingMap& operator=(const RingMap&) = delete;
@@ -73,6 +73,7 @@ class RingMap {
 
  private:
   std::string path_;
+  std::vector<std::string> alternate_paths_;
   const char* mem_ = nullptr;
   size_t map_size_ = 0;
   RingLayout layout_;
@@ -113,6 +114,10 @@ class QueueStreamReader {
   static constexpr int kUnavailablePollMicros = 100000;
 
   explicit QueueStreamReader(std::string path, int idle_poll_us = kDefaultIdlePollMicros);
+
+  // Aliases are tried while a queue is unavailable, including a session opened offroad.
+  QueueStreamReader(std::string path, std::vector<std::string> alternate_paths,
+                    int idle_poll_us = kDefaultIdlePollMicros);
 
   // Start again at the write pointer: only messages published from now on are returned.
   void restart();

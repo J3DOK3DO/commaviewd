@@ -784,7 +784,21 @@ static void handle_video_client(int client_fd, const char* video_service, int po
   // Reads the encoder queue without a msgq reader slot (msgq_ring_reader.h): any number of client
   // reconnects and bridge restarts leave openpilot's queue, and loggerd's place in it, untouched.
   // The session starts at the newest message.
-  commaview::ipc::QueueStreamReader video_reader(commaview::ipc::msgq_queue_path(video_service));
+  // Event wire ordinals and EncodeData layouts stayed the same when upstream renamed the
+  // road/driver services to narrowRoad/cabin. StarPilot still publishes the older names.
+  std::string alternate_service = video_service;
+  const std::pair<const char*, const char*> aliases[] = {
+    {"narrowRoadEncodeData", "roadEncodeData"}, {"cabinEncodeData", "driverEncodeData"},
+    {"livestreamNarrowRoadEncodeData", "livestreamRoadEncodeData"},
+    {"livestreamCabinEncodeData", "livestreamDriverEncodeData"},
+  };
+  for (const auto& alias : aliases) {
+    if (alternate_service == alias.first) { alternate_service = alias.second; break; }
+    if (alternate_service == alias.second) { alternate_service = alias.first; break; }
+  }
+  commaview::ipc::QueueStreamReader video_reader(
+      commaview::ipc::msgq_queue_path(video_service),
+      {commaview::ipc::msgq_queue_path(alternate_service)});
   std::vector<uint8_t> raw_msg;
   uint64_t ring_discontinuities = 0;
 
