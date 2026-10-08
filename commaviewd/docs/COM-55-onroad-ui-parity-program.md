@@ -1,5 +1,9 @@
 # COM-55 — comma-device onroad UI parity program plan
 
+> Historical program plan. The telemetry JSON milestone and master-only execution rule
+> predate the current runtime and repository workflow. Use the [current documentation](../../docs/README.md)
+> and [AGENTS.md](../../AGENTS.md) for today's behavior and change process.
+
 ## Objective
 Deliver testable onroad UI parity against sunnypilot staging baseline `33a8902` with phased milestones and evidence gates.
 

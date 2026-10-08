@@ -1,4 +1,9 @@
-# Telemetry Raw-Only Mode (Operator Quick Reference)
+# Telemetry forwarding overview
+
+[Documentation](../../../docs/README.md) · [Troubleshooting](../../../docs/troubleshooting.md) · [Wire contract](telemetry-raw-only-deep-dive.md)
+
+This page describes the current exporter-to-app telemetry path. For setup, updates, and
+general diagnostics, start with the guides linked above.
 
 ## What is live now
 - The CommaView exporter runs inside the openpilot/sunnypilot UI process. It builds one compact JSON payload per service and sends it to the bridge over `/data/commaview/run/ui-export.sock`.
@@ -13,8 +18,11 @@
 - The bridge startup log line includes `[RAW_ONLY_DEFAULT]`, `[DIRECT_V2_UI_EXPORT_DEFAULT]`, `[META_MODE=raw-only]` and `[UI_SOCKET_PREFERRED=on]`.
 - In `/data/commaview/run/telemetry-stats.json`, each service's `emittedCount` grows while a client is connected, and `uiExportSocket.connected` is true.
 
-## Rolling back
-- To go back to an older behavior, install an older release tag. Do not expose any rollback in normal UI flows.
+## Testing an older release
+
+To compare an older behavior, install an explicitly selected release compatible with the
+app under test. Follow the [installation guide](../../../docs/installation.md#install-a-specific-release).
+There is no runtime configuration switch back to the old bridge-side decode path.
 
 ## Validation checklist
 1. Confirm the startup markers above in the bridge log.
