@@ -90,7 +90,13 @@ int main() {
     Access::close(server);
   }
   {
+    // A drive this process is recording loses the backlog still queued when the route changes:
+    // that drive is damaged (once), and the next route starts clean.
+    std::ofstream(current) << route;
     SocketServer server(root + "/unused.sock", root + "/recipes"); Access::prepare(server, route);
+    Access::snapshot(server, frame(18, R"({"camera":"road","logMonoTime":100,"frameId":110})", 500));
+    Access::drain(server);
+    assert(server.stats().snapshot_events == 1 && server.stats().snapshot_route == route);
     Access::recipe(server, frame(kRecipeEventServiceIndex, R"({"kind":"anchor","sequence":1,"camera":"road","logMonoTime":123,"roadTimestampEof":456,"sourceFrameId":120})"));
     Access::snapshot(server, frame(18, R"({"camera":"road","logMonoTime":123,"frameId":120})"));
     std::ofstream(current) << next;
@@ -99,6 +105,7 @@ int main() {
     assert(stats.metadata_route == next && stats.route_generation == 2);
     assert(stats.recipe_events == 0 && stats.snapshot_events == 0);
     assert(stats.route_transition_discarded == 2);
+    assert(std::filesystem::exists(root + "/recipes/ui-invalid-" + route));
     const auto damaged = Access::recipe_text(server);
     assert(damaged.find("\"kind\":\"recording_fault\"") != std::string::npos);
     assert(damaged.find("\"routeId\":\"" + route + "\"") != std::string::npos);
@@ -176,6 +183,44 @@ int main() {
     assert(server.stats().recipe_events == 1 && server.stats().snapshot_events == 1);
     Access::close(server);
   }
+  for (const bool cleared_first : {false, true}) {
+    // The bridge starts offroad while CurrentRoute still names a finished drive: after a runtime
+    // update or restart, or at boot before openpilot clears the previous boot's value. This process
+    // never recorded that drive, so its queued offroad traffic is not part of it, and the next
+    // ignition must leave it intact whether openpilot clears CurrentRoute first or replaces it.
+    // (The same holds for an epoch whose ignition ended before it saw onroad.)
+    const std::string finished = cleared_first ? "finished--cleared" : "finished--replaced";
+    const std::string following = cleared_first ? "following--cleared" : "following--replaced";
+    std::ofstream(current) << finished; std::ofstream(root + "/IsOffroad") << "1";
+    SocketServer server(root + "/unused.sock", root + "/recipes"); Access::prepare(server, finished);
+    Access::snapshot(server, frame(0, "{}", 1000)); Access::drain(server);
+    assert(!server.stats().snapshot_active && server.stats().snapshot_events == 0);
+    // At ignition the UI's first records still carry the finished drive's epoch.
+    Access::snapshot(server, frame(0, "{}", 2000));
+    if (cleared_first) std::filesystem::remove(current);
+    else std::ofstream(current) << following;
+    std::ofstream(root + "/IsOffroad") << "0"; Access::recheck_road(server);
+    Access::drain(server);
+    if (cleared_first) {
+      std::ofstream(current) << following;
+      Access::snapshot(server, frame(0, "{}", 3000)); Access::drain(server);
+    }
+    assert(!std::filesystem::exists(root + "/recipes/ui-invalid-" + finished));
+    assert(Access::recipe_text(server).find("recording_fault") == std::string::npos);
+    assert(server.stats().metadata_route == following && !server.stats().metadata_damaged);
+    assert(server.stats().route_transition_discarded == 1);
+    // The next drive records normally.
+    Access::recipe(server, frame(kRecipeEventServiceIndex,
+        R"({"kind":"anchor","sequence":1,"camera":"road","logMonoTime":123,"roadTimestampEof":456})", 4000));
+    Access::snapshot(server, frame(0, "{}", 4000)); Access::drain(server);
+    assert(server.stats().recipe_events == 1 && server.stats().snapshot_events == 1);
+    assert(server.stats().snapshot_route == following && !server.stats().metadata_damaged);
+    Access::close(server);
+    // A restarted bridge does not restore damage that was never recorded.
+    SocketServer restarted(root + "/unused.sock", root + "/recipes"); Access::prepare(restarted, finished);
+    assert(!restarted.stats().metadata_damaged);
+    Access::close(restarted);
+  }
   {
     // Finalization must not abandon a known damage marker while its storage
     // is unavailable. A directory at the temporary-file path fails even as root.
@@ -206,5 +251,5 @@ int main() {
   assert(text.find("private-invalid-payload") == std::string::npos);
   assert(text.find(route) == std::string::npos && text.find(next) == std::string::npos);
   std::filesystem::remove_all(root); unsetenv("COMMAVIEWD_CURRENT_ROUTE_FILE");
-  std::cout << "PASS: generation-bound backlog, fresh-route readiness, distinct first fault and bounded overflow accounting\n";
+  std::cout << "PASS: generation-bound backlog, fresh-route readiness, restarted-offroad routes stay intact, distinct first fault and bounded overflow accounting\n";
 }

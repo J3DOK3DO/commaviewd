@@ -78,7 +78,12 @@ class SocketServer {
     bool damage_recorded = false; // Only the writer reads/writes this flag.
     uint64_t damage_attempts = 0;
     const char* damage_reason = nullptr;
-    bool onroad_observed = false; // Only the writer reads/writes the drive lifecycle flags.
+    // Only the writer reads/writes the drive lifecycle flags. onroad_observed is set once this
+    // process records onroad data for the route (an onroad snapshot or a recipe event). Only such
+    // an epoch is finalized offroad, or damaged when its queued records are lost: a route this
+    // process merely found in CurrentRoute (a restart offroad, or the previous boot's value)
+    // recorded nothing here that could be incomplete.
+    bool onroad_observed = false;
     bool finalized = false; // Offroad after onroad; later UI traffic is outside this drive.
   };
   struct RecipeRecord {

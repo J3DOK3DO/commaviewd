@@ -193,10 +193,16 @@ collection with fresh route/onroad checks. It retains `routeId` for older client
 with the correct drive. Source archive endpoints require parked/offroad.
 
 Queued recipes/snapshots carry the producer's route generation. The writer discards stale
-records and marks the affected old route damaged in a synced private `ui-invalid-<route>`
-sidecar and recipe fault row. Once an observed onroad drive is finalized offroad, later UI
-traffic for it is ignored. A missing route parameter during an established drive preserves
-its counters and marks damage; initial startup waits for a known route.
+records. When the old route is a drive this runtime process was recording (it wrote an onroad
+snapshot or a recipe event for it), the writer marks that route damaged in a synced private
+`ui-invalid-<route>` sidecar and recipe fault row. Once an observed onroad drive is finalized
+offroad, later UI traffic for it is ignored. A missing route parameter during an established
+drive preserves its counters and marks damage; initial startup waits for a known route.
+
+A route the process only found in `CurrentRoute` is never marked damaged. This happens when the
+runtime starts or restarts while parked after a drive, or at boot, before openpilot clears the
+previous boot's value. Nothing for that route was recorded in this process, so the offroad
+traffic discarded at the next ignition does not affect the finished drive.
 
 The sidecar restores `metadataDamaged` after restart and damaged archives return 409.
 Other integrity counters reset on a new route/restart. Damage writes use bounded retries

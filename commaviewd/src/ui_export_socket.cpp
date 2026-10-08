@@ -570,8 +570,13 @@ void SocketServer::recipe_writer_loop() {
     // damaged archive at the next ignition. Still observe the new route first,
     // so future offers acquire its fresh epoch instead of remaining on the old one.
     if (epoch && epoch->finalized) continue;
+    // Losing a record only damages a drive this process was recording. A bridge that starts
+    // offroad (a runtime update, or a boot that reads the previous drive's CurrentRoute before
+    // openpilot clears it) holds an epoch for a finished route: its queued offroad traffic is
+    // never part of that drive, so the next ignition must not mark the finished drive damaged.
+    const bool recording = epoch && epoch->onroad_observed;
     if (route.empty()) {
-      mark_route_damage(epoch, "route_unavailable");
+      if (recording) mark_route_damage(epoch, "route_unavailable");
       // Startup has no owner yet. A transient missing parameter during an
       // established drive must not clear that drive's integrity failures.
       std::lock_guard<std::mutex> lock(recipe_mutex_);
@@ -584,7 +589,7 @@ void SocketServer::recipe_writer_loop() {
       continue;
     }
     if (!epoch || epoch->generation != route_generation_) {
-      mark_route_damage(epoch, "route_transition_discarded");
+      if (recording) mark_route_damage(epoch, "route_transition_discarded");
       std::lock_guard<std::mutex> lock(recipe_mutex_);
       ++route_transition_discarded_;
       offer_recording_fault("metadata_route_transition", route_transition_discarded_, 0, 0, 0,
@@ -674,6 +679,8 @@ void SocketServer::recipe_writer_loop() {
       }
       continue;
     }
+    // Recipe events carry camera frame timestamps: the UI only sends them onroad.
+    epoch->onroad_observed = true;
     line.insert(1, "\"routeId\":\"" + route + "\",");
     const bool written = std::fwrite(line.data(), 1, line.size(), recipe_file_) == line.size() &&
                          std::fflush(recipe_file_) == 0 &&

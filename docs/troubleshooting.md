@@ -79,6 +79,9 @@ A recording needs the comma's source video and a usable UI metadata timeline. Th
 reports the current drive's recording status to the app, and refuses an archive known to
 have damaged metadata with **409**. A route change during initialization can also invalidate
 a preflight response; a route identifier alone is not evidence that metadata is healthy.
+Runtime v0.0.58-alpha.1 and earlier could mark a finished drive damaged when the runtime
+restarted while parked (for example, after an update) and the car was started again. That
+drive keeps returning 409. Later drives are not affected.
 
 Collect diagnostics soon after a failed button press and include its approximate time. The
 report should let a maintainer compare recording counters/faults, exporter connectivity,
