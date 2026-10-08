@@ -25,15 +25,19 @@ if [[ -z "$SCRIPT_URL" ]]; then
   if [[ -n "${COMMAVIEWD_INSTALLER_RAW_BASE:-}" ]]; then
     SCRIPT_URL="${COMMAVIEWD_INSTALLER_RAW_BASE%/}/install.sh"
   else
-    GITHUB_REPO="${COMMAVIEWD_GITHUB_REPO:-RhynoTech/commaviewd}"
+    GITHUB_REPO="${COMMAVIEWD_GITHUB_REPO:-CommaView/commaviewd}"
+    OFFICIAL_REPO=0
+    case "$GITHUB_REPO" in
+      CommaView/commaviewd|RhynoTech/commaviewd) OFFICIAL_REPO=1 ;;
+    esac
     RELEASES_ORIGIN="${COMMAVIEWD_RELEASES_ORIGIN:-https://commaview.com/commaviewd}"
     INSTALLER_REF="$shim_ref"
     # No release asked for: the runtime the current CommaView release uses.
-    if [[ -z "$INSTALLER_REF" && "$GITHUB_REPO" == "RhynoTech/commaviewd" ]]; then
+    if [[ -z "$INSTALLER_REF" && "$OFFICIAL_REPO" == "1" ]]; then
       INSTALLER_REF="$(curl -fsL --max-time 10 --retry 2 "${COMMAVIEWD_CURRENT_RELEASE_URL:-https://commaview.com/api/current-release}" \
         | tr -d '\r\n' | sed -nE 's/.*"runtimeTag"[[:space:]]*:[[:space:]]*"(v[^"]+)".*/\1/p' || true)"
     fi
-    if [[ "$GITHUB_REPO" == "RhynoTech/commaviewd" && "$INSTALLER_REF" == v* ]]; then
+    if [[ "$OFFICIAL_REPO" == "1" && "$INSTALLER_REF" == v* ]]; then
       # A release's installer, published with it on commaview.com.
       SCRIPT_URL="${RELEASES_ORIGIN%/}/${INSTALLER_REF}/comma/install.sh"
     else

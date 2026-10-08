@@ -6,18 +6,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 VERSION_ENV="${SCRIPT_DIR}/version.env"
-GITHUB_REPO="${COMMAVIEWD_RELEASE_REPO:-RhynoTech/commaviewd}"
+GITHUB_REPO="${COMMAVIEWD_RELEASE_REPO:-CommaView/commaviewd}"
 RELEASES_API_URL="${COMMAVIEWD_RELEASES_API_URL:-https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20}"
-# The runtime paired with the current CommaView app release. It describes RhynoTech/commaviewd
-# only, so another release repo skips it unless the URL is set explicitly.
+# Both official names use the same release hosting, including older app/installer settings.
+OFFICIAL_REPO=0
+case "$GITHUB_REPO" in
+  CommaView/commaviewd|RhynoTech/commaviewd) OFFICIAL_REPO=1 ;;
+esac
+# The runtime paired with the current CommaView app release. Another release repo skips it
+# unless the URL is set explicitly.
 CURRENT_RELEASE_URL="${COMMAVIEWD_CURRENT_RELEASE_URL:-}"
-if [ -z "$CURRENT_RELEASE_URL" ] && [ "$GITHUB_REPO" = "RhynoTech/commaviewd" ]; then
+if [ -z "$CURRENT_RELEASE_URL" ] && [ "$OFFICIAL_REPO" = "1" ]; then
   CURRENT_RELEASE_URL="https://commaview.com/api/current-release"
 fi
-# Where RhynoTech/commaviewd's releases are published: <origin>/<tag>/ holds the tarball, its
+# Where official releases are published: <origin>/<tag>/ holds the tarball, its
 # .sha256 and the installer's companions (comma/). Not GitHub, so the repository can be private.
 RELEASES_ORIGIN=""
-if [ "$GITHUB_REPO" = "RhynoTech/commaviewd" ]; then
+if [ "$OFFICIAL_REPO" = "1" ]; then
   RELEASES_ORIGIN="${COMMAVIEWD_RELEASES_ORIGIN:-https://commaview.com/commaviewd}"
 fi
 

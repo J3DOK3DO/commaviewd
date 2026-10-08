@@ -23,8 +23,13 @@ urls() {
 got="$(urls)"
 [ "$got" = "https://commaview.com/commaviewd/v0.0.57-alpha.1 https://commaview.com/commaviewd/v0.0.57-alpha.1/comma" ] \
   || fail "a release installs from commaview.com (got: $got)"
+for repo in CommaView/commaviewd RhynoTech/commaviewd; do
+  got="$(urls COMMAVIEWD_RELEASE_REPO="$repo")"
+  [ "$got" = "https://commaview.com/commaviewd/v0.0.57-alpha.1 https://commaview.com/commaviewd/v0.0.57-alpha.1/comma" ] \
+    || fail "both official repository names use the hosted release (got: $got)"
+done
 got="$(urls COMMAVIEWD_INSTALLER_REF=my-branch)"
-[ "$got" = "https://commaview.com/commaviewd/v0.0.57-alpha.1 https://raw.githubusercontent.com/RhynoTech/commaviewd/my-branch/comma" ] \
+[ "$got" = "https://commaview.com/commaviewd/v0.0.57-alpha.1 https://raw.githubusercontent.com/CommaView/commaviewd/my-branch/comma" ] \
   || fail "a branch's companions come from the repository (got: $got)"
 got="$(urls COMMAVIEWD_RELEASE_REPO=someone/fork)"
 [ "$got" = "https://github.com/someone/fork/releases/download/v0.0.57-alpha.1 https://raw.githubusercontent.com/someone/fork/v0.0.57-alpha.1/comma" ] \
@@ -55,5 +60,13 @@ got="$(shim --tag=v0.0.57-beta)"
 got="$(shim)"
 [ "$got" = "https://commaview.com/commaviewd/v0.0.56-alpha.5/comma/install.sh" ] || fail "shim without a tag uses the current release (got: $got)"
 grep -q "commaview.com/api/current-release" "$TMP/curl.log" || fail "shim without a tag asks for the current release"
+for repo in CommaView/commaviewd RhynoTech/commaviewd; do
+  got="$(COMMAVIEWD_GITHUB_REPO="$repo" shim --tag v0.0.57-alpha.1)"
+  [ "$got" = "https://commaview.com/commaviewd/v0.0.57-alpha.1/comma/install.sh" ] \
+    || fail "both official repository names use the hosted installer (got: $got)"
+  got="$(COMMAVIEWD_GITHUB_REPO="$repo" shim)"
+  [ "$got" = "https://commaview.com/commaviewd/v0.0.56-alpha.5/comma/install.sh" ] \
+    || fail "both official repository names use the current release (got: $got)"
+done
 
 echo "PASS: releases install from commaview.com; branches and other repositories from GitHub"
