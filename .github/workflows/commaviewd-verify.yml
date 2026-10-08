@@ -38,7 +38,8 @@ jobs:
           # Everything a check's result depends on in this repository.
           markers="$(.github/scripts/pass-marker.sh key commaviewd-pass-v1 \
             commaviewd comma comma4/install.sh tools scripts ci \
-            .github/workflows/commaviewd-verify.yml .github/workflows/commaviewd-release.yml .github/workflows/runtime-rollout.yml .github/scripts)"
+            .github/workflows/commaviewd-verify.yml .github/workflows/commaviewd-release.yml .github/workflows/runtime-rollout.yml \
+            .github/workflows/runtime-promote.yml .github/scripts)"
           planned="$(ci/plan-targets.py --targets "$TARGETS" --markers "$markers")"
           pending="$(jq -c '[.[] | select(.pending)]' <<<"$planned")"
           echo "targets=$pending" >> "$GITHUB_OUTPUT"
