@@ -1,5 +1,7 @@
 #include "source_recording_archive.h"
 
+#include "recording_metadata_files.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -20,6 +22,7 @@ namespace {
 using commaview::api::HttpResponse;
 
 constexpr uint64_t kMaxChunk = 256 * 1024;
+// One route's recipe, the most the app accepts.
 constexpr size_t kMaxRecipeBytes = 2 * 1024 * 1024;
 
 HttpResponse error(int status, const char* detail) {
@@ -81,9 +84,8 @@ int open_file_at(int dir, const char* name) {
   return ::openat(dir, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 }
 
-const char* archive_root() {
-  const char* override_root = std::getenv("COMMAVIEWD_SOURCE_ARCHIVE_ROOT");
-  return override_root && override_root[0] ? override_root : "/data/media/0/realdata";
+std::string archive_root() {
+  return recording_files::default_source_archive_root();
 }
 
 const char* recipe_root() {
@@ -116,7 +118,7 @@ HttpResponse range_response(const std::map<std::string, std::string>& q) {
     ::close(root);
   } else {
     const std::string segment_name = q.at("route") + "--" + std::to_string(segment);
-    const int root = open_directory(archive_root());
+    const int root = open_directory(archive_root().c_str());
     if (root < 0) return error(404, "archive unavailable");
     const int dir = open_directory_at(root, segment_name.c_str());
     ::close(root);
@@ -163,6 +165,7 @@ HttpResponse recipe_response(const std::map<std::string, std::string>& q) {
   if (q.size() != 1 || !q.count("route") || !safe_route(q.at("route"))) {
     return error(400, "invalid route");
   }
+  const std::string& route = q.at("route");
   const int root = open_directory(recipe_root());
   if (root < 0) return error(404, "recipe unavailable");
   DIR* dir = ::fdopendir(root);
@@ -170,59 +173,61 @@ HttpResponse recipe_response(const std::map<std::string, std::string>& q) {
     ::close(root);
     return error(404, "recipe unavailable");
   }
-  std::string body;
-  bool overflow = false;
-  const std::string match = "\"routeId\":\"" + q.at("route") + "\"";
-  std::vector<std::string> names;
+  // This route's own files, and older runtimes' per-process files holding every route's events.
+  // Other routes' files are never opened, so their size cannot affect this route.
+  struct Source {
+    recording_files::RecipeFile file;
+    std::string name;
+  };
+  std::vector<Source> sources;
   while (const dirent* entry = ::readdir(dir)) {
-    const std::string name = entry->d_name;
-    if (name.rfind("ui-source-", 0) != 0 || name.size() < 16 ||
-        name.substr(name.size() - 6) != ".jsonl") continue;
-    names.push_back(name);
+    Source source;
+    source.name = entry->d_name;
+    if (!recording_files::parse_recipe_file_name(source.name, &source.file)) continue;
+    if (!source.file.legacy && source.file.route != route) continue;
+    sources.push_back(std::move(source));
   }
-  std::sort(names.begin(), names.end());
-  for (const std::string& name : names) {
-    const int file = open_file_at(root, name.c_str());
-    if (file < 0) continue;
+  // A route's events in the order its bridge processes wrote them.
+  std::sort(sources.begin(), sources.end(), [](const Source& a, const Source& b) {
+    if (a.file.started_ms != b.file.started_ms) return a.file.started_ms < b.file.started_ms;
+    if (a.file.pid != b.file.pid) return a.file.pid < b.file.pid;
+    return a.name < b.name;
+  });
+  std::string body;
+  bool too_large = false, unreadable = false;
+  // Every writer puts the route near the start of a line, well inside the line limit.
+  const std::string match = "\"routeId\":\"" + route + "\"";
+  for (const Source& source : sources) {
+    const int file = open_file_at(root, source.name.c_str());
+    if (file < 0) {
+      if (errno == ENOENT || errno == ELOOP) continue;  // Pruned since the listing, or not ours.
+      unreadable = true;
+      break;
+    }
     struct stat info = {};
-    if (::fstat(file, &info) != 0 || !S_ISREG(info.st_mode) ||
-        info.st_size < 0 || static_cast<uint64_t>(info.st_size) > kMaxRecipeBytes) {
+    if (::fstat(file, &info) != 0 || !S_ISREG(info.st_mode)) {
       ::close(file);
-      overflow = true;
-      break;
+      continue;
     }
-    std::string source;
-    source.resize(static_cast<size_t>(info.st_size));
-    size_t have = 0;
-    while (have < source.size()) {
-      const ssize_t n = ::read(file, source.data() + have, source.size() - have);
-      if (n < 0 && errno == EINTR) continue;
-      if (n <= 0) break;
-      have += static_cast<size_t>(n);
-    }
+    const auto scan = recording_files::scan_lines(file, recording_files::kMaxRecipeLineBytes,
+        [&](const std::string& line, bool truncated) {
+          if (line.find(match) == std::string::npos) return true;
+          if (truncated || body.size() + line.size() + 1 > kMaxRecipeBytes) {
+            too_large = true;
+            return false;
+          }
+          body += line;
+          body += '\n';
+          return true;
+        });
     ::close(file);
-    if (have != source.size()) {
-      overflow = true;
-      break;
-    }
-    size_t at = 0;
-    while (at < source.size()) {
-      const size_t end = source.find('\n', at);
-      if (end == std::string::npos) break;  // Ignore incomplete last event.
-      const std::string line = source.substr(at, end - at + 1);
-      if (line.find(match) != std::string::npos) {
-        if (body.size() + line.size() > kMaxRecipeBytes) {
-          overflow = true;
-          break;
-        }
-        body += line;
-      }
-      at = end + 1;
-    }
-    if (overflow) break;
+    // A file that might hold this route's events but can't be read leaves the recipe incomplete.
+    if (scan == recording_files::LineScan::read_failed) unreadable = true;
+    if (too_large || unreadable) break;
   }
   ::closedir(dir);
-  if (overflow) return error(413, "recipe too large");
+  if (too_large) return error(413, "recipe too large");
+  if (unreadable) return error(500, "recipe unreadable");
   if (body.empty()) return error(404, "recipe unavailable");
   HttpResponse response;
   response.content_type = "application/x-ndjson";
@@ -235,7 +240,7 @@ HttpResponse manifest_response(const std::map<std::string, std::string>& q) {
   if (q.size() != 1 || !q.count("route") || !safe_route(q.at("route"))) {
     return error(400, "invalid route");
   }
-  const int root = open_directory(archive_root());
+  const int root = open_directory(archive_root().c_str());
   if (root < 0) return error(404, "archive unavailable");
   DIR* listing = ::fdopendir(root);
   if (!listing) {

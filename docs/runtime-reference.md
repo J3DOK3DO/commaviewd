@@ -163,12 +163,28 @@ The comma keeps the original drive segments. CommaView adds two kinds of metadat
 | Data | Location | Purpose |
 | --- | --- | --- |
 | Source drive segments | `/data/media/0/realdata` | The comma's own video/log archive, managed by openpilot. |
-| UI recipes, snapshots, and damage markers | `/data/commaview/recording-recipes` | Overlay timeline and integrity evidence needed for replay. |
+| UI recipes, snapshots, and damage markers | `/data/commaview/recording-recipes` | Overlay timeline and integrity evidence needed for replay; removed with the drive's segments. |
 | Recording journals and thumbnails | `/data/commaview/data/recordings` | Small records shared among the comma's paired devices, kept across runtime updates. |
 
 The app saves a journal (which drive, interval, and look) plus a thumbnail; a journal is not
 a rendered video or a copy of the source segments. Another paired device can make the replay
 while the required source archive and metadata remain available.
+
+### UI recipes and metadata retention
+
+Each runtime process writes one recipe file per drive:
+`ui-source-<route>.<process start ms>-<pid>.jsonl`. Runtime v0.0.58-alpha.1 and earlier wrote one
+`ui-source-<start ms>-<pid>.jsonl` per process for every drive.
+`GET /commaview/source-recording/recipe` returns the drive's own files, plus the lines for that
+drive in those older files, in the order the processes ran, so a drive recorded across runtime
+restarts stays complete. Other drives' files are never read. A drive's recipe returns 413 only
+when that drive's own events pass 2 MiB, the most the app accepts.
+
+The runtime removes the recipes, snapshot and damage marker of a drive whose segments openpilot
+has deleted, because nothing can be replayed from it. Removal runs when the runtime starts and
+when each new drive begins. The current drive is never removed, and nothing is removed while
+the source archive can't be listed or holds no drive at all. Older per-process files are read at
+startup and removed once every drive they name is gone.
 
 ### Recording record API
 

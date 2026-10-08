@@ -1,5 +1,8 @@
 #include "ui_export_socket.h"
 
+#include "recording_metadata_files.h"
+
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -8,7 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
+#include <set>
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -178,6 +183,87 @@ std::string default_recipe_dir() {
   return "/data/commaview/recording-recipes";
 }
 
+size_t prune_recording_metadata(const std::string& recipe_dir, const std::string& archive_root,
+                                const std::vector<std::string>& keep, bool scan_legacy) {
+  // Drives with at least one segment folder (<route>--<segment>) left.
+  std::set<std::string> drives;
+  DIR* archive = ::opendir(archive_root.c_str());
+  if (archive == nullptr) return 0;
+  bool listed = true;
+  while (true) {
+    errno = 0;
+    const dirent* entry = ::readdir(archive);
+    if (entry == nullptr) {
+      listed = errno == 0;
+      break;
+    }
+    const std::string name = entry->d_name;
+    const size_t dash = name.rfind("--");
+    if (dash == std::string::npos || dash == 0 || dash + 2 == name.size() ||
+        name.find_first_not_of("0123456789", dash + 2) != std::string::npos) continue;
+    drives.insert(name.substr(0, dash));
+  }
+  ::closedir(archive);
+  // An unreadable or empty archive (not mounted yet, or another layout) proves nothing.
+  if (!listed || drives.empty()) return 0;
+  const auto deleted = [&](const std::string& route) {
+    return drives.count(route) == 0 && std::find(keep.begin(), keep.end(), route) == keep.end();
+  };
+
+  const int directory = ::open(recipe_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (directory < 0) return 0;
+  const int listing_fd = ::dup(directory);
+  DIR* listing = listing_fd >= 0 ? ::fdopendir(listing_fd) : nullptr;
+  if (listing == nullptr) {
+    if (listing_fd >= 0) ::close(listing_fd);
+    ::close(directory);
+    return 0;
+  }
+  std::vector<std::string> doomed;
+  while (const dirent* entry = ::readdir(listing)) {
+    const std::string name = entry->d_name;
+    recording_files::RecipeFile recipe;
+    if (recording_files::parse_recipe_file_name(name, &recipe)) {
+      if (!recipe.legacy) {
+        if (deleted(recipe.route)) doomed.push_back(name);
+        continue;
+      }
+      if (!scan_legacy) continue;
+      // An older runtime's file for every route of one process: removable once all are gone.
+      const int file = ::openat(directory, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+      if (file < 0) continue;
+      bool in_use = false;
+      const auto scan = recording_files::scan_lines(file, recording_files::kMaxRecipeLineBytes,
+          [&](const std::string& line, bool) {
+            const std::string key = "\"routeId\":\"";
+            const size_t at = line.find(key);
+            if (at == std::string::npos) return true;
+            const size_t end = line.find('"', at + key.size());
+            in_use = end == std::string::npos || !deleted(line.substr(at + key.size(), end - at - key.size()));
+            return !in_use;
+          });
+      ::close(file);
+      if (scan == recording_files::LineScan::complete && !in_use) doomed.push_back(name);
+      continue;
+    }
+    std::string route;
+    if (name.rfind("ui-snapshot-", 0) == 0 && name.size() > 18 &&
+        name.compare(name.size() - 6, 6, ".jsonl") == 0) {
+      route = name.substr(12, name.size() - 18);
+    } else if (name.rfind("ui-invalid-", 0) == 0) {
+      route = name.substr(11);
+    }
+    if (recording_files::safe_route(route) && deleted(route)) doomed.push_back(name);
+  }
+  ::closedir(listing);
+  size_t removed = 0;
+  for (const std::string& name : doomed) {
+    if (::unlinkat(directory, name.c_str(), 0) == 0) ++removed;
+  }
+  ::close(directory);
+  return removed;
+}
+
 SocketServer::SocketServer(std::string socket_path, std::string recipe_dir)
     : socket_path_(std::move(socket_path)), recipe_dir_(std::move(recipe_dir)) {}
 
@@ -225,20 +311,25 @@ bool SocketServer::start() {
 
   server_fd_ = fd;
   if (!recipe_dir_.empty()) {
-    recipe_file_path_ = recipe_dir_ + "/ui-source-" + std::to_string(now_ms()) +
-                        "-" + std::to_string(getpid()) + ".jsonl";
-    if (ensure_parent_dirs(recipe_file_path_)) {
+    // Each route's recipe file opens when its first event is written.
+    bool usable = ensure_parent_dirs(recipe_dir_ + "/ui-source");
+    if (usable) {
       chmod(recipe_dir_.c_str(), 0700);
-      recipe_file_ = std::fopen(recipe_file_path_.c_str(), "a");
-      if (recipe_file_ != nullptr) fchmod(fileno(recipe_file_), 0600);
+      usable = access(recipe_dir_.c_str(), W_OK | X_OK) == 0;
     }
-    if (recipe_file_ == nullptr) {
+    if (!usable) {
       const int failure = errno;
-      std::fprintf(stderr, "[ui-export] source recipe disabled: cannot open %s errno=%d\n",
-                   recipe_file_path_.c_str(), failure);
-      recipe_file_path_.clear();
+      std::fprintf(stderr, "[ui-export] source recipe disabled: cannot write %s errno=%d\n",
+                   recipe_dir_.c_str(), failure);
     } else {
-      recipe_stopping_ = false;
+      {
+        std::lock_guard<std::mutex> lock(recipe_mutex_);
+        recipe_stamp_ = std::to_string(now_ms()) + "-" + std::to_string(getpid());
+        recipe_enabled_ = true;
+        recipe_stopping_ = false;
+      }
+      // Before the UI's frames are accepted: older runtimes' recipe files are read once here.
+      prune_metadata(true);
       recipe_thread_ = std::thread(&SocketServer::recipe_writer_loop, this);
     }
   }
@@ -282,7 +373,9 @@ void SocketServer::stop() {
     if (recipe_file_ != nullptr) {
       std::fclose(recipe_file_);
       recipe_file_ = nullptr;
+      recipe_file_route_.clear();
     }
+    recipe_enabled_ = false;
   }
   unlink(socket_path_.c_str());
 
@@ -316,7 +409,7 @@ SocketStats SocketServer::stats() const {
     result.recipe_dropped = recipe_dropped_;
     result.recipe_write_failures = recipe_write_failures_;
     result.recipe_missing_route = recipe_missing_route_;
-    result.recipe_active = recipe_file_ != nullptr;
+    result.recipe_active = recipe_enabled_;
     result.recipe_route = recipe_route_;
     result.snapshot_events = snapshot_events_;
     result.snapshot_dropped = snapshot_dropped_;
@@ -339,7 +432,7 @@ std::string SocketServer::recipe_file_path() const {
 }
 
 void SocketServer::offer_recipe_event(const LatestFrame& frame) {
-  if (frame.service_index != kRecipeEventServiceIndex || recipe_file_ == nullptr ||
+  if (frame.service_index != kRecipeEventServiceIndex || !recipe_enabled_ ||
       frame.payload.size() > 4096) return;
   const std::string json(frame.payload.begin(), frame.payload.end());
   if (!is_single_line_json_object(json)) return;
@@ -369,7 +462,7 @@ void SocketServer::offer_recipe_event(const LatestFrame& frame) {
 void SocketServer::offer_snapshot(const LatestFrame& frame) {
   // These are copies of the comma UI's already-serialized telemetry. Capture
   // at most 10 Hz per service without disk IO in the receive callback.
-  if (recipe_file_ == nullptr || frame.service_index >= kServiceCount ||
+  if (!recipe_enabled_ || frame.service_index >= kServiceCount ||
       frame.payload.empty()) return;
   if (frame.payload.size() > kMaxSnapshotPayload) {
     std::lock_guard<std::mutex> lock(recipe_mutex_);
@@ -444,14 +537,14 @@ void SocketServer::offer_recording_fault(const char* reason, uint64_t count, int
   recipe_condition_.notify_one();
 }
 
-void SocketServer::observe_route(const std::string& route) {
+bool SocketServer::observe_route(const std::string& route) {
   // Once per transition/startup, off the frame path. Restore known route damage.
-  if (route == active_route_) return;
+  if (route == active_route_) return false;
   struct stat marker = {};
   const bool damaged = !route.empty() &&
       ::lstat((recipe_dir_ + "/ui-invalid-" + route).c_str(), &marker) == 0;
   std::lock_guard<std::mutex> lock(recipe_mutex_);
-  if (route == active_route_) return;
+  if (route == active_route_) return false;
   active_route_ = route;
   ++route_generation_;
   active_epoch_ = std::make_shared<RouteEpoch>(RouteEpoch{route, route_generation_, false});
@@ -464,10 +557,48 @@ void SocketServer::observe_route(const std::string& route) {
   offroad_checked_at_ = {}; // An old drive's cached road state cannot finalize the new epoch.
   last_snapshot_offer_ms_.fill(0);
   recording_fault_counts_.fill({});
+  return true;
+}
+
+FILE* SocketServer::recipe_file_for(const std::string& route) {
+  if (recipe_file_ != nullptr && recipe_file_route_ == route) return recipe_file_;
+  if (recipe_file_ != nullptr) std::fclose(recipe_file_);  // Every line was synced when written.
+  recipe_file_ = nullptr;
+  recipe_file_route_.clear();
+  const std::string path = recipe_dir_ + "/" + recording_files::recipe_file_name(route, recipe_stamp_);
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) return nullptr;
+  FILE* file = ::fdopen(fd, "a");
+  if (file == nullptr) {
+    const int failure = errno;
+    ::close(fd);
+    errno = failure;
+    return nullptr;
+  }
+  recipe_file_ = file;
+  recipe_file_route_ = route;
+  std::lock_guard<std::mutex> lock(recipe_mutex_);
+  recipe_file_path_ = path;
+  return file;
+}
+
+void SocketServer::prune_metadata(bool scan_legacy) {
+  std::vector<std::string> keep;
+  {
+    std::lock_guard<std::mutex> lock(recipe_mutex_);
+    keep = {active_route_, snapshot_route_};
+  }
+  keep.push_back(recipe_file_route_);
+  const size_t removed = prune_recording_metadata(recipe_dir_, recording_files::default_source_archive_root(),
+                                                  keep, scan_legacy);
+  // Counts only: support exports must not carry recording identifiers.
+  if (removed > 0) {
+    std::fprintf(stderr, "[ui-export] removed %zu recording metadata files of deleted drives\n", removed);
+  }
 }
 
 void SocketServer::mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, const char* reason) {
-  if (!epoch || epoch->route.empty() || epoch->damage_recorded || recipe_file_ == nullptr) return;
+  if (!epoch || epoch->route.empty() || epoch->damage_recorded || !recipe_enabled_) return;
   // Failed storage must not turn damage-marker retries into per-frame IO.
   const uint64_t attempt = ++epoch->damage_attempts;
   if ((attempt & (attempt - 1)) != 0) return;
@@ -505,9 +636,12 @@ void SocketServer::mark_route_damage(const std::shared_ptr<RouteEpoch>& epoch, c
   ::unlink(temporary.c_str());
   const std::string marker = "\n{\"schemaVersion\":1,\"routeId\":\"" + epoch->route +
       "\",\"kind\":\"recording_fault\",\"sequence\":0,\"reason\":\"" + reason + "\"}\n";
+  // The fault row goes in that route's own recipe file, where its recipe is read from.
   errno = 0;
-  const bool written = std::fwrite(marker.data(), 1, marker.size(), recipe_file_) == marker.size() &&
-      std::fflush(recipe_file_) == 0 && fdatasync(fileno(recipe_file_)) == 0;
+  FILE* recipe = recipe_file_for(epoch->route);
+  const bool written = recipe != nullptr &&
+      std::fwrite(marker.data(), 1, marker.size(), recipe) == marker.size() &&
+      std::fflush(recipe) == 0 && fdatasync(fileno(recipe)) == 0;
   const int failure = written ? 0 : (errno ? errno : EIO);
   epoch->damage_recorded = written && persisted;
   if (!written || !persisted) {
@@ -565,7 +699,8 @@ void SocketServer::recipe_writer_loop() {
       continue;
     }
     const std::string route = current_route_id();
-    if (!route.empty()) observe_route(route);
+    // A new drive: drop the metadata of drives openpilot has deleted since.
+    if (!route.empty() && observe_route(route)) prune_metadata(false);
     // Offroad UI traffic cannot extend a finalized drive or turn it into a
     // damaged archive at the next ignition. Still observe the new route first,
     // so future offers acquire its fresh epoch instead of remaining on the old one.
@@ -682,10 +817,13 @@ void SocketServer::recipe_writer_loop() {
     // Recipe events carry camera frame timestamps: the UI only sends them onroad.
     epoch->onroad_observed = true;
     line.insert(1, "\"routeId\":\"" + route + "\",");
-    const bool written = std::fwrite(line.data(), 1, line.size(), recipe_file_) == line.size() &&
-                         std::fflush(recipe_file_) == 0 &&
-                         fdatasync(fileno(recipe_file_)) == 0;
-    const int write_error = written ? 0 : errno;
+    errno = 0;
+    FILE* recipe = recipe_file_for(route);
+    const bool written = recipe != nullptr &&
+                         std::fwrite(line.data(), 1, line.size(), recipe) == line.size() &&
+                         std::fflush(recipe) == 0 &&
+                         fdatasync(fileno(recipe)) == 0;
+    const int write_error = written ? 0 : (errno ? errno : EIO);
     std::lock_guard<std::mutex> lock(recipe_mutex_);
     if (written) {
       ++recipe_events_;
@@ -693,8 +831,8 @@ void SocketServer::recipe_writer_loop() {
     }
     else {
       ++recipe_write_failures_;
-      offer_recording_fault("recipe_write_failed", recipe_write_failures_, write_error, line.size(), 0,
-                            kRecipeEventServiceIndex);
+      offer_recording_fault(recipe == nullptr ? "recipe_open_failed" : "recipe_write_failed",
+                            recipe_write_failures_, write_error, line.size(), 0, kRecipeEventServiceIndex);
     }
   }
 }

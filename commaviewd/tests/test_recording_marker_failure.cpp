@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <unistd.h>
 
@@ -25,9 +26,17 @@ extern "C" ssize_t __wrap_write(int fd, const void* data, size_t size) {
 
 namespace commaview::ui_export {
 struct RecordingMetadataTestAccess {
+  static void enable(SocketServer& server, const char* stamp) {
+    server.recipe_enabled_ = true;
+    server.recipe_stamp_ = stamp;
+  }
+  static void close(SocketServer& server) {
+    if (server.recipe_file_) std::fclose(server.recipe_file_);
+    server.recipe_file_ = nullptr;
+    server.recipe_enabled_ = false;
+  }
   static void old_route_failure(SocketServer& server) {
-    server.recipe_file_ = tmpfile();
-    assert(server.recipe_file_ != nullptr);
+    enable(server, "1000-2");
     server.observe_route("old--drive");
     auto old_epoch = server.active_epoch_;
     server.observe_route("new--drive");
@@ -44,12 +53,16 @@ struct RecordingMetadataTestAccess {
     assert(std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-old--drive"));
     assert(!std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-new--drive"));
     assert(server.recipe_write_failures_ == 0);
-    std::fclose(server.recipe_file_); server.recipe_file_ = nullptr;
+    // The fault row is in the old route's own recipe file, never in the new drive's.
+    std::ifstream old_recipe(server.recipe_dir_ + "/ui-source-old--drive.1000-2.jsonl");
+    const std::string text((std::istreambuf_iterator<char>(old_recipe)), {});
+    assert(text.find("\"routeId\":\"old--drive\",\"kind\":\"recording_fault\"") != std::string::npos);
+    assert(!std::filesystem::exists(server.recipe_dir_ + "/ui-source-new--drive.1000-2.jsonl"));
+    close(server);
   }
 
   static void exercise(SocketServer& server, const std::string& route) {
-    server.recipe_file_ = tmpfile();
-    assert(server.recipe_file_ != nullptr);
+    enable(server, "1000-1");
     server.observe_route(route);
     server.mark_route_damage(server.active_epoch_, "route_transition_discarded");
     assert(server.metadata_damaged_ && !server.active_epoch_->damage_recorded);
@@ -63,7 +76,7 @@ struct RecordingMetadataTestAccess {
     assert(server.active_epoch_->damage_recorded && server.metadata_damaged_);
     assert(server.recipe_write_failures_ == 1);
     assert(std::filesystem::exists(server.recipe_dir_ + "/ui-invalid-" + route));
-    std::fclose(server.recipe_file_); server.recipe_file_ = nullptr;
+    close(server);
   }
 };
 }

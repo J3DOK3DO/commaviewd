@@ -103,6 +103,7 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
   "$ROOT/tests/test_recording_metadata.cpp" \
   "$ROOT/src/ui_export_socket.cpp" \
+  "$ROOT/src/source_recording_archive.cpp" \
   -o "$TMP/test_recording_metadata"
 
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" -Wl,--wrap=write \
