@@ -140,3 +140,35 @@ assert_contains "Register runtime without an APK release" "$ROLLOUT" "existing r
 assert_contains 'ref: ${{ github.event.repository.default_branch }}' "$ROLLOUT" "existing runtime registration should use current publication controls"
 assert_contains 'node scripts/publish-current-release.mjs' "$ROLLOUT" "existing runtime registration must share publication validation"
 assert_contains "TARGET_ENVIRONMENT:" "$ROLLOUT" "existing runtime registration should support staging verification before production"
+
+# Publication locks: only the public default's read-check-write waits, one promotion at a time per
+# environment. GitHub keeps one pending run per concurrency group and cancels the one before, so a
+# group shared by releases and rollouts dropped queued runs.
+PROMOTE_WORKFLOW="$REPO_ROOT/.github/workflows/runtime-promote.yml"
+assert_file "$PROMOTE_WORKFLOW"
+for workflow in "$WORKFLOW" "$ROLLOUT" "$PROMOTE_WORKFLOW"; do
+  if grep -Fq "commaviewd-runtime-publication" "$workflow"; then
+    echo "FAIL: $workflow must not share one publication lock between releases and rollouts" >&2
+    exit 1
+  fi
+done
+assert_contains 'group: commaviewd-release-${{ inputs.tag || (github.event_name == '"'push'"' && github.ref_name) || github.run_id }}' "$WORKFLOW" "a release should wait only for another run of the same tag, and a cut for nothing"
+if grep -Eq '^concurrency:' "$ROLLOUT"; then
+  echo "FAIL: registering an existing runtime is idempotent and must not queue behind other runs" >&2
+  exit 1
+fi
+assert_contains "workflow_call:" "$PROMOTE_WORKFLOW" "promotion should be shared by the release and rollout workflows"
+assert_contains 'group: commaviewd-public-default-${{ matrix.environment }}' "$PROMOTE_WORKFLOW" "promotion should be serialized per account environment"
+assert_contains "cancel-in-progress: false" "$PROMOTE_WORKFLOW" "a running promotion must never be cancelled"
+assert_contains '--promote-current' "$PROMOTE_WORKFLOW" "the promotion workflow should promote"
+for workflow in "$WORKFLOW" "$ROLLOUT"; do
+  assert_contains "uses: ./.github/workflows/runtime-promote.yml" "$workflow" "$workflow should promote through the serialized promotion workflow"
+  # Registration runs unlocked, so it must never move the public default itself.
+  if awk '/name: Register /{inside=1} /^  promote:/{inside=0} inside' "$workflow" | grep -Fq -- "promote-current"; then
+    echo "FAIL: $workflow registers without a lock and must leave promotion to runtime-promote.yml" >&2
+    exit 1
+  fi
+done
+assert_contains "if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true && inputs.promote_current == true" "$WORKFLOW" "a release should promote only when asked"
+assert_contains "if: inputs.promote_current" "$ROLLOUT" "a rollout should promote only when asked"
+echo "PASS: only promotion waits, per environment, and releases and rollouts never queue behind each other"

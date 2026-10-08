@@ -1,0 +1,92 @@
+name: runtime-promote
+
+# Moves the public installer default (an account environment's /api/current-release) to a
+# registered beta runtime. publish-current-release.mjs reads that environment's current release,
+# refuses an app it isn't compatible with or a runtime downgrade, and then writes it. That
+# read-check-write is the only publication step that must not overlap another, so it is the only
+# one that waits: one promotion at a time per environment, for this short job alone.
+#
+# Everything else the release and rollout workflows change is atomic or idempotent and takes no
+# lock, so it never waits in a concurrency group and can't be cancelled there: a tag is created
+# only if it doesn't exist, a hosted release file only if it isn't there yet (or is identical),
+# and registering a runtime repeats immutable metadata. A promotion requested while another
+# promotion of the same environment is already waiting replaces it (GitHub keeps one pending run
+# per group): both ask to move the same single default.
+#
+# Called by commaviewd-release and runtime-rollout with promote_current.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Registered beta runtime tag, e.g. v0.0.57-beta
+        type: string
+        required: true
+      sha256:
+        description: The hosted bundle's checksum
+        type: string
+        required: true
+      min_app_version:
+        description: Oldest compatible APK version (inclusive)
+        type: string
+        required: true
+      max_app_version:
+        description: Newest compatible APK version (inclusive)
+        type: string
+        required: true
+      environment:
+        description: all, staging or production
+        type: string
+        required: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  promote:
+    name: Promote the public default (${{ matrix.environment }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      # Each environment's default is checked and moved on its own.
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(inputs.environment == 'all' && '["production","staging"]' || format('["{0}"]', inputs.environment)) }}
+    concurrency:
+      group: commaviewd-public-default-${{ matrix.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Sign in to Google Cloud (release account)
+        id: gcp
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/263004041190/locations/global/workloadIdentityPools/commaview-github/providers/commaview-releases
+          service_account: commaview-release@commaview.iam.gserviceaccount.com
+          token_format: access_token
+
+      - name: Promote the public installer default
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          RELEASE_ACCOUNT: commaview-release@commaview.iam.gserviceaccount.com
+          TAG: ${{ inputs.tag }}
+          SHA256: ${{ inputs.sha256 }}
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+          TARGET_ENVIRONMENT: ${{ matrix.environment }}
+          # Each service's public address (the ID token's audience) | its Cloud Run address, which
+          # CI calls directly: Cloudflare's bot challenge stops GitHub's runners at the public one.
+          PRODUCTION_SERVICE: https://my.commaview.com|https://commaview-account-xpdgughraq-uk.a.run.app
+          STAGING_SERVICE: https://my-staging.commaview.com|https://commaview-account-staging-xpdgughraq-uk.a.run.app
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENVIRONMENT" in
+            staging) ACCOUNT_SERVICE_URL="$STAGING_SERVICE" ;;
+            production) ACCOUNT_SERVICE_URL="$PRODUCTION_SERVICE" ;;
+            *) echo "Choose all, staging, or production (got: $TARGET_ENVIRONMENT)" >&2; exit 1 ;;
+          esac
+          node scripts/publish-current-release.mjs --runtime-tag "$TAG" \
+            --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION" \
+            --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URL" --promote-current

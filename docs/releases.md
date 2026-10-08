@@ -118,6 +118,28 @@ The installer reads the default at `https://commaview.com/api/current-release`. 
 assets or registering an update offer alone does not change what an unpinned manual install
 requests.
 
+Promotion runs after registration, in
+[runtime-promote](../.github/workflows/runtime-promote.yml), for each target environment on
+its own: one environment's failed check doesn't stop the other.
+
+## Overlapping runs
+
+Releases and rollouts don't wait for each other, so a queued run is never cancelled for
+another. Everything they publish is atomic or repeatable: creating a tag fails if it exists,
+hosted files are create-only, and registration repeats immutable metadata.
+
+| Operation | Waits for |
+| --- | --- |
+| Release of a tag (tag push or explicit `tag`) | Another run of the same tag. |
+| Cut (empty `tag`) | Nothing. Two cuts at once can choose the same tag: one fails without creating it; run it again for the next tag. |
+| Registration (release with `offer_updates`, or `runtime-rollout`) | Nothing. |
+| Promotion (`promote_current=true`) | A running promotion of the same environment. |
+
+Promotion is the one read-check-write: it reads the environment's current release, refuses an
+incompatible app or a downgrade, then writes. GitHub keeps one waiting run per lock. A promotion
+requested while another promotion of the same environment is already waiting replaces it (the
+earlier one shows as cancelled). Dispatch it again if it should still happen.
+
 ## Build a local bundle for inspection
 
 This produces local files; it does not publish or register a release:

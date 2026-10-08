@@ -144,11 +144,11 @@ normally fetches its matching scripts; using a moving source ref is a developmen
 
 | Variable | Purpose |
 | --- | --- |
-| `COMMAVIEWD_RELEASE_REPO` | Release repository; default `RhynoTech/commaviewd`. |
+| `COMMAVIEWD_RELEASE_REPO` | Release repository; default `CommaView/commaviewd` (`RhynoTech/commaviewd`, its previous name, works the same). |
 | `COMMAVIEWD_RELEASE_TAG` | Explicit release tag. |
 | `COMMAVIEWD_DEFAULT_TAG` | Default tag before network lookup. |
 | `COMMAVIEWD_CURRENT_RELEASE_URL` | Current-release lookup; default `https://commaview.com/api/current-release` for this release repository. Other repositories skip it unless explicitly set. |
-| `COMMAVIEWD_RELEASES_API_URL` | GitHub releases API for the newest-release fallback. |
+| `COMMAVIEWD_RELEASES_API_URL` | GitHub releases API used when the current-release lookup fails: the newest beta by version, never an alpha (another repository: its newest release). With neither, the install stops and changes nothing. The shim reads it too. |
 | `COMMAVIEWD_RELEASES_ORIGIN` | Hosted release origin; default `https://commaview.com/commaviewd`. |
 | `COMMAVIEWD_INSTALLER_REF` | Companion script ref; default resolved release tag. |
 | `COMMAVIEWD_ASSET_NAME` | Bundle filename override. |
@@ -163,12 +163,28 @@ The comma keeps the original drive segments. CommaView adds two kinds of metadat
 | Data | Location | Purpose |
 | --- | --- | --- |
 | Source drive segments | `/data/media/0/realdata` | The comma's own video/log archive, managed by openpilot. |
-| UI recipes, snapshots, and damage markers | `/data/commaview/recording-recipes` | Overlay timeline and integrity evidence needed for replay. |
+| UI recipes, snapshots, and damage markers | `/data/commaview/recording-recipes` | Overlay timeline and integrity evidence needed for replay; removed with the drive's segments. |
 | Recording journals and thumbnails | `/data/commaview/data/recordings` | Small records shared among the comma's paired devices, kept across runtime updates. |
 
 The app saves a journal (which drive, interval, and look) plus a thumbnail; a journal is not
 a rendered video or a copy of the source segments. Another paired device can make the replay
 while the required source archive and metadata remain available.
+
+### UI recipes and metadata retention
+
+Each runtime process writes one recipe file per drive:
+`ui-source-<route>.<process start ms>-<pid>.jsonl`. Runtime v0.0.58-alpha.1 and earlier wrote one
+`ui-source-<start ms>-<pid>.jsonl` per process for every drive.
+`GET /commaview/source-recording/recipe` returns the drive's own files, plus the lines for that
+drive in those older files, in the order the processes ran, so a drive recorded across runtime
+restarts stays complete. Other drives' files are never read. A drive's recipe returns 413 only
+when that drive's own events pass 2 MiB, the most the app accepts.
+
+The runtime removes the recipes, snapshot and damage marker of a drive whose segments openpilot
+has deleted, because nothing can be replayed from it. Removal runs when the runtime starts and
+when each new drive begins. The current drive is never removed, and nothing is removed while
+the source archive can't be listed or holds no drive at all. Older per-process files are read at
+startup and removed once every drive they name is gone.
 
 ### Recording record API
 
@@ -193,10 +209,16 @@ collection with fresh route/onroad checks. It retains `routeId` for older client
 with the correct drive. Source archive endpoints require parked/offroad.
 
 Queued recipes/snapshots carry the producer's route generation. The writer discards stale
-records and marks the affected old route damaged in a synced private `ui-invalid-<route>`
-sidecar and recipe fault row. Once an observed onroad drive is finalized offroad, later UI
-traffic for it is ignored. A missing route parameter during an established drive preserves
-its counters and marks damage; initial startup waits for a known route.
+records. When the old route is a drive this runtime process was recording (it wrote an onroad
+snapshot or a recipe event for it), the writer marks that route damaged in a synced private
+`ui-invalid-<route>` sidecar and recipe fault row. Once an observed onroad drive is finalized
+offroad, later UI traffic for it is ignored. A missing route parameter during an established
+drive preserves its counters and marks damage; initial startup waits for a known route.
+
+A route the process only found in `CurrentRoute` is never marked damaged. This happens when the
+runtime starts or restarts while parked after a drive, or at boot, before openpilot clears the
+previous boot's value. Nothing for that route was recorded in this process, so the offroad
+traffic discarded at the next ignition does not affect the finished drive.
 
 The sidecar restores `metadataDamaged` after restart and damaged archives return 409.
 Other integrity counters reset on a new route/restart. Damage writes use bounded retries

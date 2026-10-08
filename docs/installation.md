@@ -30,8 +30,10 @@ curl -fsSL https://commaview.com/commaviewd/install.sh \
 ```
 
 The installer asks `https://commaview.com/api/current-release` for the default runtime paired
-with the public app release. If that lookup fails, it falls back to the newest GitHub release.
-The default does not change just because a new runtime tag exists.
+with the public app release. If that lookup fails, it installs the newest public release listed
+on GitHub: the highest beta version, never an alpha. If neither can be found, for example while
+the repository is private, it stops without changing anything. Run it again later, or name a
+release with `--tag`. The default does not change just because a new runtime tag exists.
 
 Release files and companion scripts are downloaded from
 `https://commaview.com/commaviewd/<tag>/`. You do not need a source checkout to install.

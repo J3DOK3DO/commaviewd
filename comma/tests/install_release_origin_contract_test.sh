@@ -37,20 +37,34 @@ got="$(urls COMMAVIEWD_RELEASE_REPO=someone/fork)"
 
 # The shim runs the asked-for release's installer from commaview.com, else the current release's.
 mkdir -p "$TMP/bin"
+# The stub serves the current release (or fails, with CURRENT_RELEASE_DOWN=1), the GitHub release
+# list from RELEASES_FILE (or fails without one), and for an installer a script that records the
+# arguments it was given.
 cat > "$TMP/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 for a in "$@"; do last="$a"; done
 echo "$last" >> "$CURL_LOG"
 case "$last" in
-  *current-release*) echo '{"appTag":"app-v1","runtimeTag":"v0.0.56-alpha.5"}' ;;
-  *) echo 'true' ;;
+  *current-release*)
+    [ "${CURRENT_RELEASE_DOWN:-0}" != 1 ] || exit 22
+    echo '{"appTag":"app-v1","runtimeTag":"v0.0.56-alpha.5"}' ;;
+  *api.github.com*)
+    [ -f "${RELEASES_FILE:-}" ] || exit 22
+    cat "$RELEASES_FILE" ;;
+  *) echo 'printf "%s\n" "$@" > "$INSTALLER_ARGS"' ;;
 esac
 STUB
 chmod +x "$TMP/bin/curl"
-shim() {
+run_shim() {
   : > "$TMP/curl.log"
+  : > "$TMP/installer-args"
   env -u COMMAVIEWD_COMMA_INSTALL_URL -u COMMAVIEWD_INSTALLER_RAW_BASE -u COMMAVIEWD_INSTALLER_REF -u COMMAVIEWD_REF \
-    PATH="$TMP/bin:$PATH" CURL_LOG="$TMP/curl.log" bash "$REPO_ROOT/comma4/install.sh" "$@" >/dev/null
+    -u COMMAVIEWD_RELEASES_API_URL -u COMMAVIEWD_CURRENT_RELEASE_URL \
+    PATH="$TMP/bin:$PATH" CURL_LOG="$TMP/curl.log" INSTALLER_ARGS="$TMP/installer-args" \
+    bash "$REPO_ROOT/comma4/install.sh" "$@" >/dev/null
+}
+shim() {
+  run_shim "$@"
   tail -1 "$TMP/curl.log"
 }
 got="$(shim --tag v0.0.57-alpha.1)"
@@ -69,4 +83,40 @@ for repo in CommaView/commaviewd RhynoTech/commaviewd; do
     || fail "both official repository names use the current release (got: $got)"
 done
 
-echo "PASS: releases install from commaview.com; branches and other repositories from GitHub"
+
+# Without the current release, the newest public release: a beta by version, never an alpha (GitHub
+# lists the newest-created first). Its installer is told which release, so it can't pick another.
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name": "v0.0.58-alpha.1", "prerelease": true, "draft": false},
+  {"tag_name": "v0.0.55-beta", "prerelease": false, "draft": false},
+  {"tag_name": "v0.0.57-beta", "prerelease": false, "draft": false},
+  {"tag_name": "v0.0.56-beta", "prerelease": false, "draft": false}
+]
+JSON
+echo '[{"tag_name": "v0.0.58-alpha.1", "prerelease": true, "draft": false}]' > "$TMP/alphas.json"
+args_given() { tr '\n' ' ' < "$TMP/installer-args"; }
+for repo in CommaView/commaviewd RhynoTech/commaviewd; do
+  got="$(COMMAVIEWD_GITHUB_REPO="$repo" CURRENT_RELEASE_DOWN=1 RELEASES_FILE="$TMP/releases.json" shim --force-offroad)"
+  [ "$got" = "https://commaview.com/commaviewd/v0.0.57-beta/comma/install.sh" ] \
+    || fail "without the current release, the newest beta's installer (got: $got)"
+  grep -Fq "https://api.github.com/repos/$repo/releases" "$TMP/curl.log" || fail "$repo's release list is asked"
+  [ "$(args_given)" = "--force-offroad --tag v0.0.57-beta " ] || fail "the fallback names its release (got: $(args_given))"
+done
+got="$(CURRENT_RELEASE_DOWN=1 RELEASES_FILE="$TMP/releases.json" shim --current)"
+[ "$got" = "https://commaview.com/commaviewd/v0.0.57-beta/comma/install.sh" ] || fail "--current still runs a release's installer (got: $got)"
+[ "$(args_given)" = "--current " ] || fail "--current reinstalls the installed release (got: $(args_given))"
+# Nothing to fall back to: only alphas, or a list that can't be read (a private repository).
+for releases in "$TMP/alphas.json" "$TMP/missing.json"; do
+  if CURRENT_RELEASE_DOWN=1 RELEASES_FILE="$releases" run_shim 2>"$TMP/shim-error.txt"; then
+    fail "with no public release the shim must fail ($releases)"
+  fi
+  grep -Fq "couldn't look up the current CommaView release" "$TMP/shim-error.txt" \
+    || fail "the shim should say why it stopped (got: $(cat "$TMP/shim-error.txt"))"
+  [ ! -s "$TMP/installer-args" ] || fail "the shim must not run an installer without a release"
+  if grep -Eq '/comma/install\.sh$|raw\.githubusercontent' "$TMP/curl.log"; then
+    fail "the shim must not fetch an installer without a release"
+  fi
+done
+
+echo "PASS: releases install from commaview.com; branches and other repositories from GitHub; without the current release, the newest beta or nothing"
