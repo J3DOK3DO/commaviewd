@@ -56,8 +56,12 @@ permissions:
   id-token: write
 
 concurrency:
-  # Serialize cuts and existing-bundle rollouts before either can promote the public default.
-  group: commaviewd-runtime-publication
+  # One run per release tag, so a tag isn't built twice at once. Nothing else waits here: a cut
+  # has no tag yet and takes a group of its own (creating a tag is atomic, and a cut refuses one
+  # that exists), hosted files are create-only, and registration repeats immutable metadata.
+  # Promoting the public default is the one step that waits, per environment, and only for
+  # other promotions (runtime-promote.yml).
+  group: commaviewd-release-${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -68,6 +72,9 @@ jobs:
     name: Build comma-device release bundle + publish assets
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      sha256: ${{ steps.register.outputs.sha256 }}
 
     steps:
       # A manual run with no tag cuts a release (docs: RhynoTech/CommaView docs/release/README.md):
@@ -130,7 +137,10 @@ jobs:
             echo "$TAG already exists" >&2
             exit 1
           fi
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" >/dev/null
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" >/dev/null; then
+            echo "Creating $TAG failed; if another cut created it first, run this workflow again for the next tag" >&2
+            exit 1
+          fi
           echo "Created $TAG at $SHA"
 
       - name: Resolve release tag
@@ -330,6 +340,7 @@ jobs:
           path: release-control
 
       - name: Register independent runtime release
+        id: register
         if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
@@ -337,7 +348,6 @@ jobs:
           # Register runtime offers in both account services, independently of APK releases.
           MIN_APP_VERSION: ${{ inputs.min_app_version }}
           MAX_APP_VERSION: ${{ inputs.max_app_version }}
-          PROMOTE_CURRENT: ${{ inputs.promote_current }}
           # Account services (RhynoTech/commaview-web, account/):
           # production (commaview.com/api/current-release) first, then staging.
           # Each service's public address (the ID token's audience) | its Cloud Run address, which
@@ -349,7 +359,23 @@ jobs:
           set -euo pipefail
           TAG='${{ steps.vars.outputs.tag }}'
           SHA256="$(cut -d ' ' -f1 "release/${TAG}/commaview-comma-${TAG}.tar.gz.sha256")"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          # Promotion, when asked for, is the promote job.
           args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
             --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS")
-          [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
           node release-control/scripts/publish-current-release.mjs "${args[@]}"
+
+  promote:
+    name: Promote the public installer default
+    needs: bundle-and-publish
+    if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true && inputs.promote_current == true
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/runtime-promote.yml
+    with:
+      tag: ${{ needs.bundle-and-publish.outputs.tag }}
+      sha256: ${{ needs.bundle-and-publish.outputs.sha256 }}
+      min_app_version: ${{ inputs.min_app_version }}
+      max_app_version: ${{ inputs.max_app_version }}
+      environment: all

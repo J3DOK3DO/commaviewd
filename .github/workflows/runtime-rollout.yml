@@ -35,10 +35,9 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  # Share the release workflow's publication lock so promotion preflight cannot race another cut.
-  group: commaviewd-runtime-publication
-  cancel-in-progress: false
+# No run-wide lock: registering repeats immutable metadata, so rollouts never wait for each other
+# or for a release, and can't be cancelled in a queue. Only promotion waits, per environment
+# (runtime-promote.yml).
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -47,6 +46,8 @@ jobs:
   register:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.release.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -87,7 +88,6 @@ jobs:
           TAG: ${{ inputs.tag }}
           MIN_APP_VERSION: ${{ inputs.min_app_version }}
           MAX_APP_VERSION: ${{ inputs.max_app_version }}
-          PROMOTE_CURRENT: ${{ inputs.promote_current }}
           SHA256: ${{ steps.release.outputs.sha256 }}
           TARGET_ENVIRONMENT: ${{ inputs.environment }}
           PRODUCTION_SERVICE: https://my.commaview.com|https://commaview-account-xpdgughraq-uk.a.run.app
@@ -100,7 +100,22 @@ jobs:
             all) ACCOUNT_SERVICE_URLS="$PRODUCTION_SERVICE,$STAGING_SERVICE" ;;
             *) echo 'Choose all, staging, or production' >&2; exit 1 ;;
           esac
-          args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
-            --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS")
-          [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
-          node scripts/publish-current-release.mjs "${args[@]}"
+          # Promotion, when asked for, is the next job.
+          node scripts/publish-current-release.mjs --runtime-tag "$TAG" \
+            --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION" \
+            --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS"
+
+  promote:
+    name: Promote the public installer default
+    needs: register
+    if: inputs.promote_current
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/runtime-promote.yml
+    with:
+      tag: ${{ inputs.tag }}
+      sha256: ${{ needs.register.outputs.sha256 }}
+      min_app_version: ${{ inputs.min_app_version }}
+      max_app_version: ${{ inputs.max_app_version }}
+      environment: ${{ inputs.environment }}

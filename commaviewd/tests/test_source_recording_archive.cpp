@@ -117,6 +117,55 @@ int main() {
   assert(stat((segment + "/fcamera.hevc").c_str(), &original) == 0 && original.st_size == 10);
   assert(unlink(fault.c_str()) == 0);
   assert(source_recording_archive_response(range).body == "2345");
+  {
+    // Each bridge process writes one file per route; older runtimes wrote one file per process
+    // for every route. A route's recipe joins its own files and those older ones, in the order the
+    // processes ran, and no other route's file (of any size) can make it fail.
+    const std::string own = "0000000a--recipe", other = "0000000b--other", wide = "0000000c--wide";
+    const auto event = [](const std::string& id, int sequence) {
+      return "{\"routeId\":\"" + id + "\",\"schemaVersion\":1,\"sequence\":" + std::to_string(sequence) + "}\n";
+    };
+    const std::string legacy_path = recipes + "/ui-source-1500-3.jsonl";
+    {
+      // An older process's file well past 2 MiB, nearly all of it another route's events.
+      std::ofstream legacy(legacy_path);
+      legacy << event(own, 2);
+      const std::string filler = event(other, 9);
+      for (size_t written = 0; written < 3 * 1024 * 1024; written += filler.size()) legacy << filler;
+      legacy << "{\"routeId\":\"" << other << "\",\"pad\":\"" << std::string(40000, 'x') << "\"}\n";
+      legacy << "{\"routeId\":\"" << wide << "\",\"pad\":\"" << std::string(40000, 'x') << "\"}\n";
+      legacy << event(own, 3);
+    }
+    // This route's files from two later processes, numbered so that a text sort would misorder
+    // them. The first process stopped partway through a line.
+    const std::string first = recipes + "/ui-source-" + own + ".1000-9.jsonl";
+    const std::string second = recipes + "/ui-source-" + own + ".2000-10.jsonl";
+    const std::string third = recipes + "/ui-source-" + own + ".2000-9.jsonl";
+    std::ofstream(first) << event(own, 1) << "{\"routeId\":\"" << own << "\",\"seq";
+    std::ofstream(second) << event(own, 5);
+    std::ofstream(third) << event(own, 4);
+    // Another route's file, far past the limit and not even JSON, is never read for this one.
+    const std::string other_file = recipes + "/ui-source-" + other + ".1000-9.jsonl";
+    std::ofstream(other_file) << std::string(3 * 1024 * 1024, 'y') << "\n";
+    // A symlink is never followed.
+    const std::string linked = recipes + "/ui-source-" + own + ".3000-1.jsonl";
+    assert(symlink(second.c_str(), linked.c_str()) == 0);
+
+    const auto own_recipe = source_recording_archive_response("/commaview/source-recording/recipe?route=" + own);
+    assert(own_recipe.status == 200);
+    assert(own_recipe.body == event(own, 1) + event(own, 2) + event(own, 3) + event(own, 4) + event(own, 5));
+    // The route the large file belongs to is too large on its own: only it is refused.
+    assert(source_recording_archive_response("/commaview/source-recording/recipe?route=" + other).status == 413);
+    // So is a route with an event longer than any writer produces.
+    assert(source_recording_archive_response("/commaview/source-recording/recipe?route=" + wide).status == 413);
+    const auto unrelated = source_recording_archive_response("/commaview/source-recording/recipe?route=" + route);
+    assert(unrelated.status == 200 && unrelated.body == "{\"routeId\":\"" + route + "\",\"sequence\":1}\n");
+    assert(source_recording_archive_response(
+        "/commaview/source-recording/recipe?route=0000000d--absent").status == 404);
+    for (const std::string& path : {legacy_path, first, second, third, other_file, linked}) {
+      assert(unlink(path.c_str()) == 0);
+    }
+  }
   unlink(link.c_str());
   unlink((segment + "/fcamera.hevc").c_str());
   unlink((segment + "/ecamera.hevc").c_str());

@@ -312,7 +312,8 @@ def test_install_script_preserves_patch_flavor_state_and_supports_explicit_curre
     assert '"$INSTALL_DIR/config/hud-lite-patch.env"' in text
     assert "--current" in text
     assert "USE_CURRENT_RELEASE" in text
-    assert 'RELEASE_TAG="$(resolve_latest_release_tag)"' in text
+    assert 'RELEASE_TAG="$(resolve_fallback_release_tag)"' in text
+    assert 'RELEASE_TAG="v0.0.1-alpha"' not in text
     assert "--force-offroad" in text
     # Never asks openpilot to go offroad: an install asked for while driving is queued instead.
     assert 'write_param' not in text

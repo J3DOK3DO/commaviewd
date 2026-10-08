@@ -1,6 +1,6 @@
 #include "drive_retention.h"
 
-#include "openpilot_log_root.h"
+#include "recording_metadata_files.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -27,8 +27,7 @@ constexpr size_t kRateSegments = 30;  // the newest segments a minute's size is 
 constexpr time_t kScanCacheSeconds = 5 * 60;
 
 std::string archive_root() {
-  const char* override_root = std::getenv("COMMAVIEWD_SOURCE_ARCHIVE_ROOT");
-  return override_root && override_root[0] ? override_root : openpilot_log_root();
+  return recording_files::default_source_archive_root();
 }
 
 commaview::api::HttpResponse json(int status, const std::string& body) {

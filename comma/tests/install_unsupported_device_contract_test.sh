@@ -59,7 +59,7 @@ grep -Fq "COMMAVIEW_UNSUPPORTED_DEVICE" <<<"$out" && fail "install.sh should not
 grep -Fq 'refuse_unsupported_device "$@"' "$INSTALL_SH" || fail "install.sh should check the device"
 # The check runs before the default release lookup (the first thing that reaches the network).
 check_line="$(grep -n '^refuse_unsupported_device "\$@"' "$INSTALL_SH" | cut -d: -f1)"
-lookup_line="$(grep -n '^  resolve_release_inputs$' "$INSTALL_SH" | tail -n1 | cut -d: -f1)"
+lookup_line="$(grep -nE '^  resolve_release_inputs( |$)' "$INSTALL_SH" | tail -n1 | cut -d: -f1)"
 [[ "$check_line" -lt "$lookup_line" ]] || fail "install.sh should refuse a comma 3 before looking up a release"
 # uninstall.sh has no device check: an earlier install on a comma 3 can still be removed.
 ! grep -Fq 'tici' "$REPO_ROOT/comma/uninstall.sh" || fail "uninstall.sh should work on every device"
