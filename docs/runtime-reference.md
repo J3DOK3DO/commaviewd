@@ -67,7 +67,7 @@ bearer token; the app manages pairing. The table lists common operations, not ev
 | `POST /commaview/runtime-debug/config` | Paired | Persist a validated configuration. |
 | `POST /commaview/runtime-debug/defaults` | Paired | Restore default configuration. |
 | `POST /commaview/runtime-debug/apply` | Paired | Apply configuration to the bridge in place. |
-| `GET /commaview/drive-stats` | Paired | Cached drive statistics. |
+| `GET /commaview/drive-stats` | Paired | Drives recorded while they happen (`data/drives/`), the drive going on, and comma's totals. |
 | `GET /commaview/location`, `POST /commaview/location` | Paired | Read/configure opt-in device location. |
 
 The current capability list includes `runtime-update`, `runtime-uninstall`, `reboot`,

@@ -94,6 +94,7 @@ std::optional<CarSample> car_sample_from_event(const uint8_t* data, size_t size)
     sample.gear_known = gear != cereal::CarState::GearShifter::UNKNOWN;
     sample.in_park = gear == cereal::CarState::GearShifter::PARK;
     sample.standstill = car.getStandstill();
+    sample.v_ego = car.getVEgo();
     return sample;
   });
 }

@@ -29,8 +29,9 @@ toggle (`videoDisabledReason`), so the app explains a missing video only when it
 
 StarPilot's High Bitrate Recording (`/cache/use_HD`) and Konik (`/cache/use_konik`) settings move
 drive logs to `/data/media/0/realdata_HD` or `realdata_konik` (system/hardware/hw.py). Recordings,
-drive stats and drive retention follow the same rule, and only while StarPilot is installed, since
-the markers outlive a fork change.
+the position fallback and drive retention follow the same rule, and only while StarPilot is
+installed, since the markers outlive a fork change. Drive stats don't read the logs at all: each
+drive is measured from `carState` while it happens.
 
 StarPilot runs its livestream encoder only without a car, so the developer-only
 `COMMAVIEW_VIDEO_SOURCE=livestream` has no video in a car. The default encoder source is unaffected.

@@ -5,12 +5,16 @@
 // msgq_selfdriveState queue files laid out by this build's own msgq and schema (GEAR is unknown,
 // park or drive), for the control API's integration tests. --write-device-state DIR STARTED_AGO_MS
 // writes msgq_deviceState with openpilot started that long ago, and --write-gps DIR SPEED_MS a
-// fresh gpsLocationExternal fix at that speed.
+// fresh gpsLocationExternal fix at that speed. --append-car-state FILE V_EGO COUNT INTERVAL_MS
+// publishes COUNT carStates at V_EGO m/s, INTERVAL_MS apart and ending now, onto the queue in FILE
+// (made if missing) the way msgq_msg_send does, for the drive watcher's distance.
 #include "road_phase.h"
 
 #include <capnp/dynamic.h>
 #include <capnp/message.h>
 #include <capnp/serialize.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -76,15 +80,57 @@ cereal::CarState::GearShifter gear_named(const std::string& name) {
   return cereal::CarState::GearShifter::UNKNOWN;
 }
 
-std::vector<uint8_t> car_event(cereal::CarState::GearShifter gear, bool standstill, uint64_t mono_ns) {
+std::vector<uint8_t> car_event(cereal::CarState::GearShifter gear, bool standstill, uint64_t mono_ns,
+                               float v_ego = -1.0f) {
   capnp::MallocMessageBuilder builder;
   auto event = builder.initRoot<cereal::Event>();
   event.setLogMonoTime(mono_ns);
   auto car = event.initCarState();
   car.setGearShifter(gear);
   car.setStandstill(standstill);
-  car.setVEgo(standstill ? 0.0f : 12.0f);
+  car.setVEgo(v_ego >= 0.0f ? v_ego : (standstill ? 0.0f : 12.0f));
   return bytes_of(builder);
+}
+
+// Publishes carStates onto a live queue as msgq_msg_send does: each message whole, then the write
+// pointer moved past it (a -1 tag where a lap ends). A reader following the queue sees only these.
+int append_car_state(const std::string& path, float v_ego, int count, int interval_ms) {
+  const size_t data_size = 4u << 20;  // a whole number of KiB, as openpilot's queue sizes are
+  const size_t file_size = sizeof(msgq_header_t) + data_size;
+  const int fd = open(path.c_str(), O_RDWR | O_CREAT, 0600);
+  if (fd < 0) return 1;
+  struct stat st {};
+  if (fstat(fd, &st) != 0 || (static_cast<size_t>(st.st_size) != file_size && ftruncate(fd, file_size) != 0)) {
+    close(fd);
+    return 1;
+  }
+  void* mapped = mmap(nullptr, file_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (mapped == MAP_FAILED) return 1;
+  char* header = static_cast<char*>(mapped);
+  char* data = header + sizeof(msgq_header_t);
+  auto* write_pointer = reinterpret_cast<uint64_t*>(header + offsetof(msgq_header_t, write_pointer));
+  uint64_t pointer = __atomic_load_n(write_pointer, __ATOMIC_ACQUIRE);
+  uint64_t lap = pointer >> 32, offset = pointer & 0xFFFFFFFFu;
+  const uint64_t now = now_ns();
+  for (int i = 0; i < count; ++i) {
+    const uint64_t at = now - static_cast<uint64_t>(count - 1 - i) * static_cast<uint64_t>(interval_ms) * 1000000ULL;
+    const auto message = car_event(cereal::CarState::GearShifter::DRIVE, v_ego < 0.3f, at, v_ego);
+    const uint64_t total = sizeof(int64_t) + message.size();
+    if (offset + total + sizeof(int64_t) > data_size) {
+      const int64_t wrap = -1;
+      std::memcpy(data + offset, &wrap, sizeof(wrap));
+      lap += 1;
+      offset = 0;
+    }
+    const int64_t n = static_cast<int64_t>(message.size());
+    std::memcpy(data + offset, &n, sizeof(n));
+    std::memcpy(data + offset + sizeof(n), message.data(), message.size());
+    offset = (offset + total + 7) & ~uint64_t{7};
+    __atomic_store_n(write_pointer, (lap << 32) | offset, __ATOMIC_RELEASE);
+  }
+  munmap(mapped, file_size);
+  return 0;
 }
 
 std::vector<uint8_t> selfdrive_event(bool enabled, uint64_t mono_ns) {
@@ -270,6 +316,9 @@ void test_events() {
   const auto sample = commaview::road::car_sample_from_event(car.data(), car.size());
   check(sample && sample->gear_known && sample->in_park && sample->standstill && sample->log_mono_ns == now,
         "carState gear, standstill and time are read");
+  const auto moving = car_event(cereal::CarState::GearShifter::DRIVE, false, now, 27.5f);
+  const auto moving_sample = commaview::road::car_sample_from_event(moving.data(), moving.size());
+  check(moving_sample && moving_sample->v_ego == 27.5f && !moving_sample->standstill, "carState.vEgo is read");
   const auto device = device_event(now - 5, now);
   const auto started = commaview::road::started_mono_from_event(device.data(), device.size());
   check(started && *started == now - 5, "deviceState.startedMonoTime is read");
@@ -342,6 +391,9 @@ int main(int argc, char** argv) {
     const uint64_t at = now_ns();
     write_queue(std::string(argv[2]) + "/msgq_deviceState", {device_event(at - std::strtoull(argv[3], nullptr, 10) * 1000000ULL, at)});
     return 0;
+  }
+  if (argc >= 6 && std::string(argv[1]) == "--append-car-state") {
+    return append_car_state(argv[2], std::strtof(argv[3], nullptr), std::atoi(argv[4]), std::atoi(argv[5]));
   }
   if (argc >= 4 && std::string(argv[1]) == "--write-gps") {
     write_queue(std::string(argv[2]) + "/msgq_gpsLocationExternal", {gps_event(std::strtof(argv[3], nullptr), now_ns())});
