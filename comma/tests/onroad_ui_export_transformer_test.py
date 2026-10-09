@@ -1378,7 +1378,7 @@ def test_apply_script_rejects_unsupported_upstream_fork_even_with_state_flavor(t
 
     assert result.returncode == 1
     assert "unsupported upstream remote" in result.stderr
-    assert "commaai/openpilot and sunnypilot" in result.stderr
+    assert "commaai/openpilot, sunnypilot and StarPilot" in result.stderr
 
 
 def test_verify_script_rejects_unsupported_upstream_fork_even_with_state_flavor(tmp_path):
@@ -1391,7 +1391,7 @@ def test_verify_script_rejects_unsupported_upstream_fork_even_with_state_flavor(
 
     assert result.returncode == 1
     assert "unsupported upstream remote" in result.stdout
-    assert "commaai/openpilot and sunnypilot" in result.stdout
+    assert "commaai/openpilot, sunnypilot and StarPilot" in result.stdout
 
 
 def test_verify_script_fails_when_existing_flat_augmented_road_target_is_stale(tmp_path):
@@ -1489,7 +1489,14 @@ def test_verify_without_car_params_reports_no_car(tmp_path):
     assert "carFingerprint" not in status
 
 
-@pytest.mark.parametrize("remote", ["https://github.com/firestar5683/StarPilot.git", "git@github.com:firestar5683/StarPilot.git"])
+# installer.comma.ai/firestar5683/StarPilot clones firestar5683/openpilot, the repository's former name.
+@pytest.mark.parametrize("remote", [
+    "https://github.com/firestar5683/openpilot.git",
+    "https://github.com/firestar5683/StarPilot.git",
+    "git@github.com:firestar5683/StarPilot.git",
+    "https://github.com/Firestar5683/starpilot/",
+    "ssh://git@github.com/firestar5683/openpilot.git",
+])
 def test_apply_and_verify_starpilot_remote(tmp_path, remote):
     op_root = write_full_augmented_tree(tmp_path)
     init_git_repo(op_root)
@@ -1501,3 +1508,13 @@ def test_apply_and_verify_starpilot_remote(tmp_path, remote):
     result = run_lifecycle_script(REPO_ROOT / "comma/scripts/verify_onroad_ui_export_patch.sh", install_dir, op_root, "--json")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["flavor"] == "starpilot"
+
+
+def test_apply_refuses_firestars_other_forks(tmp_path):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/firestar5683/FrogPilot.git"], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert result.returncode != 0
+    assert "unsupported upstream remote" in result.stderr

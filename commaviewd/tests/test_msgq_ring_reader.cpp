@@ -568,11 +568,33 @@ static void test_stale_preferred_queue_does_not_mask_fork_alias() {
   CHECK(reader.path() == alternate.path);
 }
 
+// A session that settled on a stale alias follows the other queue once it is opened again.
+static void test_stale_alias_gives_way_to_reopened_queue() {
+  TestQueue preferred("reopened"), alternate("stale_alias");
+  std::unique_ptr<Context> ctx(Context::create());
+  auto stale_publisher = make_publisher(ctx.get(), alternate.endpoint);
+  QueueStreamReader reader(preferred.path, {alternate.path});
+  std::vector<uint8_t> out;
+  bool gap = false;
+  CHECK(reader.try_next(&out, &gap) == ReadStatus::kEmpty);
+  CHECK(reader.path() == alternate.path);
+  auto active_publisher = make_publisher(ctx.get(), preferred.endpoint);
+  const timespec old_time[2] = {{1, 0}, {1, 0}};
+  CHECK(utimensat(AT_FDCWD, alternate.path.c_str(), old_time, 0) == 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // the next periodic look at the files
+  CHECK(reader.try_next(&out, &gap) == ReadStatus::kEmpty);
+  CHECK(reader.path() == preferred.path);
+  publish(active_publisher.get(), "reopened");
+  CHECK(reader.next(50, &out, &gap));
+  CHECK(text_of(out) == "reopened");
+}
+
 int main(int argc, char** argv) {
   unsetenv("OPENPILOT_PREFIX");
   if (argc == 4 && std::string(argv[1]) == "--cpu-bench") return cpu_bench(std::atoi(argv[2]), std::atoi(argv[3]));
   test_stale_preferred_queue_does_not_mask_fork_alias();
   test_late_encoder_alias();
+  test_stale_alias_gives_way_to_reopened_queue();
   test_layout_from_file_size();
   test_subscriber_per_restart_evicts_loggerd();
   test_restarts_and_reconnects_never_touch_loggerd();

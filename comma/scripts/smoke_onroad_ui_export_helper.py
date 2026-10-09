@@ -153,7 +153,7 @@ def load_module(helper_path: Path):
 
 def main() -> int:
   if len(sys.argv) != 3:
-    print("usage: smoke_onroad_ui_export_helper.py <commaview_export.py> <OPENPILOT|SUNNYPILOT>", file=sys.stderr)
+    print("usage: smoke_onroad_ui_export_helper.py <commaview_export.py> <OPENPILOT|SUNNYPILOT|STARPILOT>", file=sys.stderr)
     return 2
   helper_path = Path(sys.argv[1])
   flavor = sys.argv[2]

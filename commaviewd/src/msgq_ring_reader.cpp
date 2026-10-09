@@ -81,18 +81,18 @@ bool RingMap::refresh(bool* remapped) {
            ring_layout_for_file_size(static_cast<size_t>(info->st_size)).has_value();
   };
   bool found = usable(path_, &st);
-  if (!found || mem_ == nullptr) {
-    for (auto& alternate : alternate_paths_) {
-      struct stat candidate {};
-      if (usable(alternate, &candidate) && (!found ||
-          candidate.st_mtim.tv_sec > st.st_mtim.tv_sec ||
-          (candidate.st_mtim.tv_sec == st.st_mtim.tv_sec && candidate.st_mtim.tv_nsec > st.st_mtim.tv_nsec))) {
-        // Queue files can survive a fork change. On first mapping prefer the encoder queue
-        // opened most recently, then keep following it for this session. Never create a queue.
-        std::swap(path_, alternate);
-        st = candidate;
-        found = true;
-      }
+  // Queue files can survive a fork change. Follow the encoder queue opened most recently (opening
+  // a queue truncates it, which sets its mtime): the current one keeps ties, and a stale alias
+  // gives way as soon as the other is opened again. Checked at every refresh, so a session never
+  // stays on a queue nobody writes. Never create a queue.
+  for (auto& alternate : alternate_paths_) {
+    struct stat candidate {};
+    if (usable(alternate, &candidate) && (!found ||
+        candidate.st_mtim.tv_sec > st.st_mtim.tv_sec ||
+        (candidate.st_mtim.tv_sec == st.st_mtim.tv_sec && candidate.st_mtim.tv_nsec > st.st_mtim.tv_nsec))) {
+      std::swap(path_, alternate);
+      st = candidate;
+      found = true;
     }
   }
   if (!found) {

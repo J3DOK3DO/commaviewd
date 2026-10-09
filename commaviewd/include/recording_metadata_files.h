@@ -12,15 +12,20 @@
 #include <unistd.h>
 #include <utility>
 
+#include "openpilot_log_root.h"
+
 namespace commaview::recording_files {
+
+using commaview::runtime::openpilot_log_root;
 
 // Longest recipe line either side handles. Writers produce lines under 5 KiB (a 4 KiB event plus
 // the route and capture time), so anything longer is not a recipe event.
 inline constexpr size_t kMaxRecipeLineBytes = 16 * 1024;
 
+// Where the drives are: loggerd's log root (openpilot_log_root.h), which StarPilot can move.
 inline std::string default_source_archive_root() {
   const char* override_root = std::getenv("COMMAVIEWD_SOURCE_ARCHIVE_ROOT");
-  return override_root && override_root[0] ? override_root : "/data/media/0/realdata";
+  return override_root && override_root[0] ? override_root : openpilot_log_root();
 }
 
 inline bool safe_route(const std::string& value) {

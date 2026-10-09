@@ -44,7 +44,23 @@ from datetime import datetime, timezone
 ROOT = os.environ.get("COMMAVIEW_DRIVE_ROOT", "/data/commaview")
 LIVE_DIR = os.environ.get("COMMAVIEW_DRIVE_LIVE_DIR", "/dev/shm/commaview")
 PARAMS_DIR = os.environ.get("COMMAVIEW_DRIVE_PARAMS_DIR", "/data/params/d")
-LOG_ROOT = os.environ.get("COMMAVIEW_DRIVE_LOG_ROOT", "/data/media/0/realdata")
+
+
+def openpilot_log_root(openpilot_dir: str = "/data/openpilot", cache_dir: str = "/cache",
+                       media_dir: str = "/data/media/0") -> str:
+  """Where loggerd writes drives (system/hardware/hw.py Paths.log_root()). StarPilot moves it while its
+  High Bitrate Recording (/cache/use_HD) or Konik (/cache/use_konik) marker exists. Other forks ignore
+  those markers, which outlive a fork change on /cache, so they count only under StarPilot
+  (commaviewd/include/openpilot_log_root.h)."""
+  if os.path.isdir(os.path.join(openpilot_dir, "starpilot")):
+    if os.path.isfile(os.path.join(cache_dir, "use_HD")):
+      return os.path.join(media_dir, "realdata_HD")
+    if os.path.isfile(os.path.join(cache_dir, "use_konik")):
+      return os.path.join(media_dir, "realdata_konik")
+  return os.path.join(media_dir, "realdata")
+
+
+LOG_ROOT = os.environ.get("COMMAVIEW_DRIVE_LOG_ROOT") or openpilot_log_root()
 # Where openpilot reads which comma this is (system/hardware: "comma tici", "comma tizi", "comma mici").
 DEVICE_MODEL_FILE = os.environ.get("COMMAVIEW_DRIVE_DEVICE_MODEL_FILE", "/sys/firmware/devicetree/base/model")
 

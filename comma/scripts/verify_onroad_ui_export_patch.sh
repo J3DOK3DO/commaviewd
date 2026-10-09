@@ -219,13 +219,18 @@ ui_platform="$(detect_ui_platform "$REQUESTED_UI_PLATFORM")" || ui_platform=""
 mapfile -t AUGMENTED_ROAD_PATHS < <(augmented_paths_for_platform "${ui_platform:-auto}" || true)
 
 remote_flavor() {
-  local remote="$1"
+  # GitHub owners and repositories are case-insensitive, and installers keep the case typed.
+  local remote
+  remote="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  remote="${remote%/}"
   remote="${remote%.git}"
   remote="${remote%/}"
   case "$remote" in
     *github.com:commaai/openpilot|*github.com/commaai/openpilot) printf '%s\n' openpilot ;;
     *github.com:sunnypilot/sunnypilot|*github.com/sunnypilot/sunnypilot|*github.com:sunnypilot/openpilot|*github.com/sunnypilot/openpilot) printf '%s\n' sunnypilot ;;
-    *github.com:firestar5683/StarPilot|*github.com/firestar5683/StarPilot) printf '%s\n' starpilot ;;
+    # StarPilot's installer (installer.comma.ai/firestar5683/StarPilot) clones the repository by its
+    # former name, firestar5683/openpilot, which GitHub redirects to firestar5683/StarPilot.
+    *github.com:firestar5683/starpilot|*github.com/firestar5683/starpilot|*github.com:firestar5683/openpilot|*github.com/firestar5683/openpilot) printf '%s\n' starpilot ;;
     *) return 1 ;;
   esac
 }
@@ -410,7 +415,7 @@ elif ! git -C "$OP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 elif [ -z "$ui_platform" ]; then
   state="unknown-platform"; reason="unable to determine UI platform for $OP_ROOT; pass --platform mici or --platform tizi"
 elif [ "$flavor_detected" -ne 1 ]; then
-  state="unknown-flavor"; reason="unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot and sunnypilot remotes"
+  state="unknown-flavor"; reason="unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot, sunnypilot and StarPilot (firestar5683) remotes"
 elif [ ! -f "$template_path" ]; then
   state="missing-template"; reason="missing socket UI export helper template for $flavor"
 elif [ ! -f "$TRANSFORMER" ]; then

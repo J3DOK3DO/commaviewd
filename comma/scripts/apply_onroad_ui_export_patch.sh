@@ -595,13 +595,18 @@ write_patch_state_env() {
 }
 
 remote_flavor() {
-  local remote="$1"
+  # GitHub owners and repositories are case-insensitive, and installers keep the case typed.
+  local remote
+  remote="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  remote="${remote%/}"
   remote="${remote%.git}"
   remote="${remote%/}"
   case "$remote" in
     *github.com:commaai/openpilot|*github.com/commaai/openpilot) printf '%s\n' openpilot ;;
     *github.com:sunnypilot/sunnypilot|*github.com/sunnypilot/sunnypilot|*github.com:sunnypilot/openpilot|*github.com/sunnypilot/openpilot) printf '%s\n' sunnypilot ;;
-    *github.com:firestar5683/StarPilot|*github.com/firestar5683/StarPilot) printf '%s\n' starpilot ;;
+    # StarPilot's installer (installer.comma.ai/firestar5683/StarPilot) clones the repository by its
+    # former name, firestar5683/openpilot, which GitHub redirects to firestar5683/StarPilot.
+    *github.com:firestar5683/starpilot|*github.com/firestar5683/starpilot|*github.com:firestar5683/openpilot|*github.com/firestar5683/openpilot) printf '%s\n' starpilot ;;
     *) return 1 ;;
   esac
 }
@@ -631,7 +636,7 @@ detect_flavor() {
 }
 
 flavor="$(detect_flavor)" || {
-  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot and sunnypilot and firestar5683/StarPilot remotes" >&2
+  echo "ERROR: unsupported upstream remote for $OP_ROOT; CommaView currently supports only commaai/openpilot, sunnypilot and StarPilot (firestar5683) remotes" >&2
   exit 1
 }
 ui_platform="$(detect_ui_platform "$REQUESTED_UI_PLATFORM")" || {

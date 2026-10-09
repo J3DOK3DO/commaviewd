@@ -1024,21 +1024,18 @@ class _CommaViewSocketExporter:
         return default
 
     # Export resolved upstream colors, rather than duplicate StarPilot's status priorities in
-    # every client. Imports occur only when its UI is fully initialized; failure stays UI-safe.
+    # every client. StarPilot shows its modes only through these colors, never as text.
+    # Imports occur only when its UI is fully initialized; any failure keeps the defaults, so
+    # the rest of uiStateOnroad is still published.
     def argb(color):
       return (int(color.a) << 24) | (int(color.r) << 16) | (int(color.g) << 8) | int(color.b)
 
-    border = path_edge = screen_edge = 0xFF122839
-    banner = ""
+    border = screen_edge = 0xFF122839
     try:
-      from openpilot.selfdrive.ui.lib.starpilot_status import (
-        get_border_color, get_path_edge_color, get_screen_edge_color, get_mode_transition_banner_text,
-      )
+      from openpilot.selfdrive.ui.lib.starpilot_status import get_border_color, get_screen_edge_color
       border = argb(get_border_color(ui_state))
-      path_edge = argb(get_path_edge_color(ui_state))
       screen_edge = argb(get_screen_edge_color(ui_state))
-      banner = get_mode_transition_banner_text(ui_state) or ""
-    except (ImportError, AttributeError, KeyError, TypeError, ValueError):
+    except Exception:
       pass
 
     model_ui = bool(param("ModelUI", "bool", True))
@@ -1064,7 +1061,7 @@ class _CommaViewSocketExporter:
       import pyray as rl
       from openpilot.selfdrive.ui.lib.starpilot_theme import get_visual_color
       path_color = argb(get_visual_color(params, "PathColor", "Path", rl.Color(48, 255, 156, 255)))
-    except (ImportError, AttributeError, KeyError, TypeError, ValueError):
+    except Exception:
       pass
     toggles = getattr(ui_state, "starpilot_toggles", {}) or {}
     return {
@@ -1075,10 +1072,7 @@ class _CommaViewSocketExporter:
       "longitudinalOnlyActive": long_only,
       "trafficModeEnabled": bool(getattr(ui_state, "traffic_mode_enabled", False)),
       "switchbackModeEnabled": bool(getattr(ui_state, "switchback_mode_enabled", False)),
-      "conditionalStatus": _safe_int(getattr(ui_state, "conditional_status", 0)),
-      "modeBanner": banner,
       "borderColor": border,
-      "pathEdgeColor": path_edge,
       "screenEdgeColor": screen_edge,
       "reverse": reverse,
       "drawRoadOverlays": not reverse and active_camera not in ("driver", "none"),

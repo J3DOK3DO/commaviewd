@@ -1,5 +1,7 @@
 #include "drive_retention.h"
 
+#include "recording_metadata_files.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -24,9 +26,8 @@ constexpr size_t kMaxRoutes = 300;
 constexpr size_t kRateSegments = 30;  // the newest segments a minute's size is taken from
 constexpr time_t kScanCacheSeconds = 5 * 60;
 
-const char* archive_root() {
-  const char* override_root = std::getenv("COMMAVIEWD_SOURCE_ARCHIVE_ROOT");
-  return override_root && override_root[0] ? override_root : "/data/media/0/realdata";
+std::string archive_root() {
+  return recording_files::default_source_archive_root();
 }
 
 commaview::api::HttpResponse json(int status, const std::string& body) {
@@ -252,9 +253,9 @@ commaview::api::HttpResponse drive_retention_response(const std::string& request
   for (const std::string& route : routes) {
     if (!safe_route(route)) return json(400, "{\"ok\":false,\"error\":\"bad route\"}");
   }
-  const char* root = archive_root();
+  const std::string root = archive_root();
   struct statvfs vfs {};
-  if (statvfs(root, &vfs) != 0) return json(503, "{\"ok\":false,\"error\":\"drives unavailable\"}");
+  if (statvfs(root.c_str(), &vfs) != 0) return json(503, "{\"ok\":false,\"error\":\"drives unavailable\"}");
   DiskSpace disk;
   disk.available_bytes = static_cast<uint64_t>(vfs.f_bavail) * vfs.f_frsize;
   disk.total_bytes = static_cast<uint64_t>(vfs.f_blocks) * vfs.f_frsize;
@@ -264,7 +265,7 @@ commaview::api::HttpResponse drive_retention_response(const std::string& request
   static time_t cached_at = 0;
   const time_t now = time(nullptr);
   if (cached_root != root || now - cached_at > kScanCacheSeconds || now < cached_at) {
-    cached = scan(root);
+    cached = scan(root.c_str());
     cached_root = root;
     cached_at = now;
   }
