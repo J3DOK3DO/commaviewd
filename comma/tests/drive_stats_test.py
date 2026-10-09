@@ -20,10 +20,10 @@ def stats(tmp_path, monkeypatch):
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   monkeypatch.setattr(module, "DRIVES_FILE", str(tmp_path / "data" / "drives.json"))
+  monkeypatch.setattr(module, "DRIVES_DIR", str(tmp_path / "data" / "drives"))
   monkeypatch.setattr(module, "STATS_FILE", str(tmp_path / "data" / "drive-stats.json"))
   monkeypatch.setattr(module, "COMMA_API_FILE", str(tmp_path / "data" / "comma-api-stats.json"))
   monkeypatch.setattr(module, "LOCATION_CONFIG_FILE", str(tmp_path / "config" / "location.json"))
-  monkeypatch.setattr(module, "LOCATION_LAST_FILE", str(tmp_path / "data" / "location-last.json"))
   monkeypatch.setattr(module, "LOCATION_LOG_FILE", str(tmp_path / "live" / "location-log.json"))
   monkeypatch.setattr(module, "PARAMS_DIR", str(tmp_path / "params"))
   monkeypatch.setattr(module, "LOG_ROOT", str(tmp_path / "realdata"))
@@ -67,23 +67,6 @@ def enable_location(stats, enabled=True):
   stats.write_json_atomic(stats.LOCATION_CONFIG_FILE, {"enabled": enabled})
 
 
-def test_a_drive_is_summarized_from_its_own_logs(stats):
-  reader = make_route(stats, [minute(100, 20.0, lat=37.70), minute(160, 20.0, lat=37.71)])
-  summary = stats.summarize_route(ROUTE, reader)
-  assert summary.distance_m == pytest.approx(2400, abs=5)
-  assert summary.last_fix["lat"] == pytest.approx(37.7159, abs=1e-5)
-
-
-def test_gaps_in_the_log_and_repeated_samples_add_no_distance(stats):
-  summary = stats.DriveSummary()
-  summary.add("carState", 1_000_000_000, car(10.0))
-  summary.add("carState", 1_000_000_000, car(10.0))  # the same sample again
-  summary.add("carState", 1_500_000_000, car(10.0))
-  summary.add("carState", 9_000_000_000, car(10.0))  # the log skips 7.5 s: not joined
-  summary.add("carState", 9_100_000_000, car(-3.0))  # reversing never subtracts
-  assert summary.distance_m == pytest.approx(5.35, abs=0.01)
-
-
 def test_only_a_real_fix_becomes_a_position(stats):
   assert stats.fix_from_gps(gps()) == {
     "lat": 37.7749, "lon": -122.4194, "accuracyM": 4.2, "bearingDeg": 90.0, "speedMs": 12.5, "fixMs": NOW,
@@ -104,55 +87,33 @@ def test_segments_are_this_routes_in_order(stats):
   assert stats.route_segments("") == [] and stats.route_segments("../etc") == []
 
 
-def test_after_a_drive_its_distance_time_and_end_are_kept(stats):
-  enable_location(stats)
-  Path(stats.LOCATION_LOG_FILE).parent.mkdir(parents=True)
-  Path(stats.LOCATION_LOG_FILE).write_text("{}")
-  reader = make_route(stats, [minute(100, 20.0, lat=37.70)])
-  drive = stats.after_drive(ROUTE, NOW - 70_000, NOW, 70, NOW + 30_000, reader)
-  assert drive == {"startMs": NOW - 70_000, "endMs": NOW, "durationS": 70, "distanceM": 1198, "route": ROUTE}
-  saved = json.loads(Path(stats.DRIVES_FILE).read_text())
-  assert saved == {"version": 1, "sinceMs": NOW - 70_000, "drives": [drive]}
-  last = json.loads(Path(stats.LOCATION_LAST_FILE).read_text())
-  assert last["lat"] == pytest.approx(37.7059, abs=1e-5) and last["endedMs"] == NOW and last["source"] == "log"
-  assert not Path(stats.LOCATION_LOG_FILE).exists()
+def write_drive(stats, drive, name=None):
+  folder = Path(stats.DRIVES_DIR)
+  folder.mkdir(parents=True, exist_ok=True)
+  (folder / (name or f"{drive['startMs']}.json")).write_text(json.dumps(drive))
 
 
-def test_the_same_drive_summarized_twice_is_kept_once_and_old_drives_go(stats):
-  reader = make_route(stats, [minute(100, 10.0)])
-  ledger = stats.DriveLedger()
-  ledger.add({"startMs": NOW - 70 * DAY, "endMs": NOW - 70 * DAY + 60_000, "durationS": 60, "distanceM": 1, "route": "old"}, NOW - 70 * DAY)
-  stats.write_json_atomic(stats.DRIVES_FILE, ledger.to_json())
-  stats.after_drive(ROUTE, NOW - 60_000, NOW, 60, NOW, reader)
-  stats.after_drive(ROUTE, NOW - 60_000, NOW, 60, NOW, reader)
-  saved = json.loads(Path(stats.DRIVES_FILE).read_text())
-  assert [d.get("route") for d in saved["drives"]] == [ROUTE]
-  assert saved["sinceMs"] == NOW - 70 * DAY
+def test_the_drive_list_is_the_control_services_folder(stats):
+  assert stats.read_drives() == []
+  first = {"startMs": NOW - DAY, "endMs": NOW - DAY + 600_000, "durationS": 600, "distanceM": 9000, "route": ROUTE}
+  going_on = {"startMs": NOW - 60_000, "endMs": NOW, "durationS": 60, "distanceM": 700}
+  write_drive(stats, going_on)
+  write_drive(stats, first)
+  assert stats.read_drives() == [first, going_on]
+  # Anything else in the folder isn't a drive: a file being written, notes, a drive before the clock was set.
+  write_drive(stats, first, name=f"{first['startMs']}.json.tmp")
+  write_drive(stats, {"startMs": 5, "endMs": NOW}, name="5.json")
+  (Path(stats.DRIVES_DIR) / "7.json").write_text("{not json")
+  write_drive(stats, first, name="notes.json")
+  assert stats.read_drives() == [first, going_on]
 
 
-def test_where_the_drive_ended_from_the_comma_itself_is_kept(stats):
-  enable_location(stats)
-  from_comma = {"lat": 37.9, "lon": -122.5, "fixMs": NOW - 1000, "endedMs": NOW + 1000, "source": "comma"}
-  stats.write_json_atomic(stats.LOCATION_LAST_FILE, from_comma)
-  reader = make_route(stats, [minute(100, 20.0, lat=37.70)])
-  stats.after_drive(ROUTE, NOW - 60_000, NOW, 60, NOW + 30_000, reader)
-  assert json.loads(Path(stats.LOCATION_LAST_FILE).read_text()) == from_comma
-  # A position from an earlier drive is replaced by this one's, from its log.
-  stats.write_json_atomic(stats.LOCATION_LAST_FILE, dict(from_comma, endedMs=NOW - DAY))
-  stats.after_drive(ROUTE, NOW - 60_000, NOW, 60, NOW + 30_000, reader)
-  assert json.loads(Path(stats.LOCATION_LAST_FILE).read_text())["source"] == "log"
-
-
-def test_without_location_the_drive_leaves_no_position(stats):
-  reader = make_route(stats, [minute(100, 20.0, lat=37.70)])
-  stats.after_drive(ROUTE, NOW - 60_000, NOW, 60, NOW, reader)
-  assert not Path(stats.LOCATION_LAST_FILE).exists()
-
-
-def test_a_drive_that_began_before_the_clock_was_set_is_placed_by_its_end(stats):
-  assert stats.place_drive(0, NOW, 600, NOW) == (NOW - 600_000, NOW)
-  assert stats.place_drive(0, 0, 600, NOW) == (NOW - 600_000, NOW)
-  assert stats.place_drive(0, 0, 600, 0) is None
+def test_drives_still_in_the_old_list_are_read_once(stats):
+  old = {"startMs": NOW - 2 * DAY, "endMs": NOW - 2 * DAY + 60_000, "durationS": 60, "distanceM": 1000}
+  moved = {"startMs": NOW - DAY, "endMs": NOW - DAY + 60_000, "durationS": 60, "distanceM": 2000}
+  stats.write_json_atomic(stats.DRIVES_FILE, {"version": 1, "sinceMs": old["startMs"], "drives": [old, moved, {"startMs": 1}]})
+  write_drive(stats, dict(moved, distanceM=2500))
+  assert stats.read_drives() == [old, dict(moved, distanceM=2500)]
 
 
 def test_the_position_while_driving_is_the_last_finished_minute(stats):
@@ -224,9 +185,9 @@ def test_an_unregistered_comma_does_not_ask(stats):
     stats.fetch_totals_from_comma()
 
 
-def test_the_command_line_needs_a_drives_length(stats):
+def test_nothing_runs_after_a_drive_any_more(stats):
   with pytest.raises(SystemExit):
-    stats.main(["after-drive", "--route", ROUTE])
+    stats.main(["after-drive", "--route", ROUTE, "--duration-s", "60"])
 
 
 def test_starpilot_markers_move_the_log_root_only_under_starpilot(stats, tmp_path):

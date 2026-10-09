@@ -18,7 +18,7 @@
 //
 // carState, selfdriveState, deviceState and the GPS queues are read from their msgq queues the way
 // gps_peek.h reads GPS: mapped read-only, no subscriber, no reader slot, and only when a request
-// asks.
+// asks. (The drive watcher also follows carState that way, for each drive's distance.)
 
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +44,7 @@ struct CarSample {
   bool gear_known = false;  // gearShifter is not "unknown"
   bool in_park = false;
   bool standstill = false;
+  float v_ego = 0.0f;  // m/s, for the drive's distance (drive_ledger.h)
 };
 
 struct SelfdriveSample {

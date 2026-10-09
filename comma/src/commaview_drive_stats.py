@@ -2,12 +2,10 @@
 """CommaView drive stats: what this comma drove, from what it already keeps.
 
 A short run, started by the control service; nothing here subscribes to openpilot's messages or
-stays running between drives.
+stays running between drives. The drives themselves are measured and kept by the control service
+while they happen (commaviewd/src/drive_ledger.h): a comma often loses power with the car, so nothing
+is left to do after a drive.
 
-  after-drive  Read the drive's own logs (openpilot writes a qlog for every minute of driving, with
-               the car's speed ten times a second and its GPS once a second) for its distance and,
-               when location is on and the control service didn't catch it, where it ended. Then
-               refresh comma's totals.
   totals       Refresh comma's past-week and all-time totals for this comma: sunnypilot's cached
                copy (ApiCache_DriveStats) when it has one, otherwise one request to comma made with
                the comma's own identity, as sunnypilot's Trips page does. What that request answers is
@@ -15,7 +13,8 @@ stays running between drives.
                figure from sunnypilot's copy; with a fresh copy the request is still made, at most
                every 6 hours.
   position     While a drive goes on and location is on: where the car was at the end of the drive's
-               last finished log minute. The fallback when the comma's GPS can't be read directly.
+               last finished log minute (openpilot writes a qlog for every minute of driving, with its
+               GPS once a second). The fallback when the comma's GPS can't be read directly.
   leaderboard-register, leaderboard-statement
                For a paired phone, while the control service waits: this comma's leaderboard key
                signs a registration (for the account service's challenge) or a statement of its
@@ -23,10 +22,11 @@ stays running between drives.
                runtime's own request to comma has fetched it (data/comma-api-stats.json). The answer
                is one JSON line on stdout.
 
-Files (under ROOT unless noted): data/drives.json, data/drive-stats.json, data/comma-api-stats.json,
-and only while location is on data/location-last.json and LIVE_DIR/location-log.json. Positions are
-never logged. Once the comma joins the leaderboard: data/leaderboard-key.json (its private key, 0600,
-never logged) and data/leaderboard-seq.json (the statement counter).
+Files (under ROOT unless noted): data/drives/ (read only: one file per drive, from the control
+service), data/drive-stats.json, data/comma-api-stats.json, and only while location is on
+LIVE_DIR/location-log.json. Positions are never logged. Once the comma joins the leaderboard:
+data/leaderboard-key.json (its private key, 0600, never logged) and data/leaderboard-seq.json (the
+statement counter).
 """
 
 from __future__ import annotations
@@ -64,20 +64,19 @@ LOG_ROOT = os.environ.get("COMMAVIEW_DRIVE_LOG_ROOT") or openpilot_log_root()
 # Where openpilot reads which comma this is (system/hardware: "comma tici", "comma tizi", "comma mici").
 DEVICE_MODEL_FILE = os.environ.get("COMMAVIEW_DRIVE_DEVICE_MODEL_FILE", "/sys/firmware/devicetree/base/model")
 
+# One file per drive, <startMs>.json, written by the control service while each drive goes on.
+DRIVES_DIR = os.path.join(ROOT, "data", "drives")
+DRIVE_FILE_NAME = re.compile(r"\d+\.json")
+# The single drive list earlier runtimes kept; the control service moves it into DRIVES_DIR.
 DRIVES_FILE = os.path.join(ROOT, "data", "drives.json")
 STATS_FILE = os.path.join(ROOT, "data", "drive-stats.json")
 # Only what this runtime's own request to comma answered: the leaderboard's source for commaStats.
 COMMA_API_FILE = os.path.join(ROOT, "data", "comma-api-stats.json")
 LOCATION_CONFIG_FILE = os.path.join(ROOT, "config", "location.json")
-LOCATION_LAST_FILE = os.path.join(ROOT, "data", "location-last.json")
 LOCATION_LOG_FILE = os.path.join(LIVE_DIR, "location-log.json")
 
-KEEP_DAYS = 62
-DAY_MS = 86_400_000
 # A clock before 2024 hasn't been set yet (no GPS or network time since boot).
 VALID_WALL_MS = 1_704_067_200_000
-# Speed samples further apart than this aren't joined, so a gap in the log never counts as distance.
-MAX_SAMPLE_GAP_S = 1.0
 GPS_EVENTS = ("gpsLocationExternal", "gpsLocation")
 
 
@@ -191,113 +190,56 @@ def fix_from_gps(gps):
     return None
 
 
-class DriveSummary:
-  """Distance from the logged speed, and the last GPS fix, over a drive's events in order."""
+class LastFix:
+  """The last GPS fix over a log's events in order."""
 
   def __init__(self):
-    self.distance_m = 0.0
-    self.last_speed = None
-    self.last_mono = None
     self.last_fix = None
 
-  def add(self, which: str, mono_ns: int, message) -> None:
-    if which == "carState":
-      speed, mono = float(message.vEgo), mono_ns / 1e9
-      if self.last_mono is not None and mono <= self.last_mono:
-        return
-      if self.last_mono is not None and self.last_speed is not None and 0.0 < mono - self.last_mono <= MAX_SAMPLE_GAP_S:
-        self.distance_m += max(0.0, (self.last_speed + speed) / 2.0) * (mono - self.last_mono)
-      self.last_speed, self.last_mono = speed, mono
-    elif which in GPS_EVENTS:
+  def add(self, which: str, message) -> None:
+    if which in GPS_EVENTS:
       fix = fix_from_gps(message)
       if fix is not None:
         self.last_fix = fix
 
 
-def summarize_route(route: str, reader=read_qlog) -> DriveSummary:
-  summary = DriveSummary()
-  for segment in route_segments(route):
-    for which, mono, message in reader(os.path.join(segment, "qlog.zst")):
-      summary.add(which, mono, message)
-  return summary
-
-
 # ---------------------------------------------------------------- The drive list
 
-class DriveLedger:
-  """The drives this comma has made since it started keeping them; phones group them into days."""
-
-  def __init__(self, saved=None):
-    saved = saved if isinstance(saved, dict) else {}
-    self.since_ms = saved.get("sinceMs") if valid_wall(saved.get("sinceMs")) else None
-    drives = saved.get("drives") if isinstance(saved.get("drives"), list) else []
-    self.drives = [d for d in drives if isinstance(d, dict) and valid_wall(d.get("startMs")) and valid_wall(d.get("endMs"))]
-
-  def add(self, drive: dict, now_ms: int) -> None:
-    if self.since_ms is None and valid_wall(now_ms):
-      self.since_ms = min(now_ms, drive["startMs"])
-    # The same drive summarized again replaces itself.
-    self.drives = [d for d in self.drives if not (drive.get("route") and d.get("route") == drive["route"])]
-    self.drives.append(drive)
-    self.drives.sort(key=lambda d: d["startMs"])
-
-  def prune(self, now_ms: int) -> None:
-    if valid_wall(now_ms):
-      oldest = now_ms - KEEP_DAYS * DAY_MS
-      self.drives = [d for d in self.drives if d["endMs"] >= oldest]
-
-  def to_json(self) -> dict:
-    return {"version": 1, "sinceMs": self.since_ms, "drives": self.drives}
+def usable_drive(drive) -> bool:
+  return isinstance(drive, dict) and valid_wall(drive.get("startMs")) and valid_wall(drive.get("endMs"))
 
 
-def place_drive(start_ms: int, end_ms: int, duration_s: int, now_ms: int):
-  """The drive's start and end on the wall clock, even when the clock was set during the drive."""
-  if valid_wall(end_ms):
-    end = end_ms
-  elif valid_wall(now_ms):
-    end = now_ms
-  else:
-    return None
-  start = start_ms if valid_wall(start_ms) and start_ms <= end else end - duration_s * 1000
-  return start, end
-
-
-def after_drive(route: str, start_ms: int, end_ms: int, duration_s: int, now_ms: int, reader=read_qlog) -> dict | None:
-  placed = place_drive(start_ms, end_ms, duration_s, now_ms)
-  if placed is None:
-    log("the clock isn't set; this drive can't be placed")
-    return None
-  summary = summarize_route(route, reader)
-  drive = {"startMs": placed[0], "endMs": placed[1], "durationS": int(duration_s), "distanceM": int(round(summary.distance_m))}
-  if route:
-    drive["route"] = route
-  ledger = DriveLedger(read_json(DRIVES_FILE))
-  ledger.add(drive, now_ms)
-  ledger.prune(now_ms)
-  write_json_atomic(DRIVES_FILE, ledger.to_json())
-  if summary.last_fix is not None and location_enabled():
-    saved = read_json(LOCATION_LAST_FILE)
-    # The control service keeps where the drive ended from the comma's own GPS; the log fills in
-    # only when it couldn't.
-    from_comma = isinstance(saved, dict) and valid_wall(saved.get("endedMs")) and saved["endedMs"] >= placed[0]
-    if not from_comma:
-      write_json_atomic(LOCATION_LAST_FILE, dict(summary.last_fix, endedMs=placed[1], source="log"))
+def read_drives() -> list:
+  """The drives this comma has kept, oldest first: one file each in DRIVES_DIR (the control service
+  writes them while each drive goes on, the one going on included), and any still in the single list
+  earlier runtimes kept. One drive per start."""
+  drives = {}
+  saved = read_json(DRIVES_FILE)
+  listed = saved.get("drives") if isinstance(saved, dict) else None
+  for drive in listed if isinstance(listed, list) else []:
+    if usable_drive(drive):
+      drives[drive["startMs"]] = drive
   try:
-    os.remove(LOCATION_LOG_FILE)  # the drive is over; its position now lives in location-last
+    names = os.listdir(DRIVES_DIR)
   except OSError:
-    pass
-  return drive
+    names = []
+  for name in names:
+    if DRIVE_FILE_NAME.fullmatch(name):
+      drive = read_json(os.path.join(DRIVES_DIR, name))
+      if usable_drive(drive):
+        drives[drive["startMs"]] = drive
+  return [drives[start] for start in sorted(drives)]
 
 
 def latest_position(route: str, reader=read_qlog):
   """Where the car was at the end of the drive's last finished minute (the newest log is still open)."""
   segments = route_segments(route)
   for segment in reversed(segments[:-1]):
-    summary = DriveSummary()
-    for which, mono, message in reader(os.path.join(segment, "qlog.zst")):
-      summary.add(which, mono, message)
-    if summary.last_fix is not None:
-      return dict(summary.last_fix, segment=os.path.basename(segment), source="log")
+    found = LastFix()
+    for which, _mono, message in reader(os.path.join(segment, "qlog.zst")):
+      found.add(which, message)
+    if found.last_fix is not None:
+      return dict(found.last_fix, segment=os.path.basename(segment), source="log")
   return None
 
 
@@ -724,7 +666,7 @@ def leaderboard_statement(now_ms: int) -> dict:
     if seq > LEADERBOARD_MAX_SEQ:
       raise LeaderboardError(1, "seq exhausted")
     write_private_json(LEADERBOARD_SEQ_FILE, {"version": 1, "keyId": kid, "seq": seq})
-    days = drive_days(DriveLedger(read_json(DRIVES_FILE)).drives, now_ms)
+    days = drive_days(read_drives(), now_ms)
     return {"ok": True, "statement": statement_token(key, seq, now_ms, days), "keyId": kid, "seq": seq}
 
 
@@ -748,11 +690,6 @@ def main(argv=None) -> int:
   os.umask(0o077)  # drives and positions are this comma owner's alone
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   sub = parser.add_subparsers(dest="mode", required=True)
-  drive = sub.add_parser("after-drive")
-  drive.add_argument("--route", default="")
-  drive.add_argument("--start-ms", type=int, default=0)
-  drive.add_argument("--end-ms", type=int, default=0)
-  drive.add_argument("--duration-s", type=int, required=True)
   sub.add_parser("totals")
   pos = sub.add_parser("position")
   pos.add_argument("--route", required=True)
@@ -767,10 +704,7 @@ def main(argv=None) -> int:
     return leaderboard_main(lambda: leaderboard_register(args.challenge, args.rotate, now_ms))
   if args.mode == "leaderboard-statement":
     return leaderboard_main(lambda: leaderboard_statement(now_ms))
-  if args.mode == "after-drive":
-    after_drive(args.route, args.start_ms, args.end_ms, args.duration_s, now_ms)
-    refresh_totals(now_ms)
-  elif args.mode == "totals":
+  if args.mode == "totals":
     refresh_totals(now_ms)
   elif args.mode == "position":
     position(args.route)

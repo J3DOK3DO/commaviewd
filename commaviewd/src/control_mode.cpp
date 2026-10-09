@@ -1,7 +1,9 @@
 #include "control_mode.h"
+#include "drive_ledger.h"
 #include "gps_peek.h"
 #include "http_server.h"
 #include "manager_state_peek.h"
+#include "msgq_ring_reader.h"
 #include "process_hygiene.h"
 #include "process_watch.h"
 #include "road_phase.h"
@@ -1106,10 +1108,12 @@ std::string wifi_power_save_set_response(const std::string& body) {
          "\",\"enabled\":" + (mode == "on" ? "true" : "false") + ",\"reconnectRequired\":true}";
 }
 
-// ---- Drive stats and location, from what the comma already keeps: its onroad flag, its drive
-// logs, and the positions sunnypilot saves. Nothing here subscribes to openpilot's messages. A short
-// script (commaview_drive_stats.py) runs after each drive to read the drive's logs and comma's
-// totals; the API only reads files, and deletes the location files the moment location is turned off.
+// ---- Drive stats and location, from what the comma already keeps: its onroad flag, carState and
+// the GPS read from their msgq queues without subscribing (no reader slot), and the positions
+// sunnypilot saves. Each drive is measured while it happens and kept in its own file as it goes
+// (drive_ledger.h): a comma often loses power with the car, so nothing waits for the drive to end. A
+// short script (commaview_drive_stats.py) fetches comma's totals; the API only reads files, and
+// deletes the location files the moment location is turned off.
 
 std::string drivelog_root() {
 #if !defined(__aarch64__)
@@ -1234,9 +1238,18 @@ constexpr int kTotalsStaleSec = 30 * 60;
 constexpr int kTotalsRefreshSec = 6 * 60 * 60;
 constexpr int kTotalsRequestGapSec = 5 * 60;
 constexpr int kPositionRunGapSec = 60;
-constexpr int kAfterDriveDelaySec = 30;  // lets loggerd close the drive's last log first
-constexpr int kMinDriveSec = 10;
+// comma's totals: first this long after the control service starts (parked or driving: a comma that
+// powers off with the car is never parked for long), then every kTotalsRefreshSec.
+constexpr int kTotalsFirstSec = 90;
+constexpr int kMinDriveSec = 10;  // shorter is an ignition blip, not a drive
 constexpr int kDriveScriptTimeoutSec = 10 * 60;
+// How often the drive watcher drains carState (100 Hz) for the distance.
+constexpr int kDriveMeterPollMs = 100;
+// The drive list (drive_ledger.h): one file per drive, when the comma started keeping them, and the
+// single list it replaced.
+constexpr const char* kDriveListDir = "data/drives";
+constexpr const char* kDriveSinceFile = "data/drives-since.json";
+constexpr const char* kLegacyDriveListFile = "data/drives.json";
 
 int64_t wall_ms_now() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1357,7 +1370,8 @@ RoadState road_state() {
   return RoadState::kUnknown;
 }
 
-// ---- The drive watcher: notices each drive from the onroad flag and runs the script afterwards.
+// ---- The drive watcher: notices each drive from the onroad flag, measures it from carState while
+// it goes on, and keeps it in its own file as it goes (drive_ledger.h).
 
 using SteadyClock = std::chrono::steady_clock;
 
@@ -1380,6 +1394,18 @@ struct DriveWatch {
   SteadyClock::time_point last_position_run;
   std::optional<commaview::gps::Fix> last_fix;  // the comma's newest fix this drive, while location is on
   bool started = false;
+
+  // This drive's distance so far, and its file: named by its start once the clock is set, or the
+  // file of the same route this drive carries on (the control service restarted mid-drive).
+  commaview::drives::DistanceMeter meter;
+  std::string record_path;
+  int64_t record_start_ms = 0;
+  int64_t carried_distance_m = 0;
+  int64_t carried_duration_s = 0;
+  bool route_checked = false;
+  SteadyClock::time_point last_checkpoint;
+  double checkpoint_distance_m = 0.0;  // the meter's distance at the last write
+  bool stopped = true;
 };
 
 std::mutex g_drive_mutex;
@@ -1398,14 +1424,26 @@ int drive_poll_ms() {
     if (ms > 0) return ms;
   }
 #endif
-  return 5000;
+  return 1000;
 }
 
-int after_drive_delay_sec() {
+// Host tests shorten the waits a drive takes: COMMAVIEWD_TEST_DRIVE_CHECKPOINT_MS (how often a drive's
+// file is rewritten) and COMMAVIEWD_TEST_TOTALS_FIRST_MS (the first totals run).
+std::chrono::milliseconds test_override_ms(const char* name, std::chrono::milliseconds normal) {
 #if !defined(__aarch64__)
-  if (std::getenv("COMMAVIEWD_TEST_DRIVE_SCRIPT") != nullptr) return 0;
+  if (const char* value = std::getenv(name)) {
+    const long ms = std::atol(value);
+    if (ms > 0) return std::chrono::milliseconds(ms);
+  }
+#else
+  (void)name;
 #endif
-  return kAfterDriveDelaySec;
+  return normal;
+}
+
+std::chrono::milliseconds drive_checkpoint_interval() {
+  return test_override_ms("COMMAVIEWD_TEST_DRIVE_CHECKPOINT_MS",
+                          std::chrono::seconds(commaview::drives::kCheckpointIntervalSec));
 }
 
 // Where python3 is, searched now rather than in the child after fork.
@@ -1565,12 +1603,91 @@ void queue_drive_script_locked(std::vector<std::string> args, int delay_sec = 0)
   g_drive.queued.push_back({std::move(args), SteadyClock::now() + std::chrono::seconds(delay_sec)});
 }
 
+std::string drive_list_dir() { return drivelog_path(kDriveListDir); }
+
+// A drive's file this drive carries on: the control service restarted mid-drive (an update, a
+// crash) and the route is the one it was recording. Only a file written in the last few minutes:
+// a route name is never taken from a drive that ended.
+constexpr int64_t kDriveResumeWindowMs = 10 * 60 * 1000;
+
+// Writes this drive's file as it stands: its start, now as its end so far, how long and how far.
+// Nothing for the first kMinDriveSec (an ignition blip) or while the clock isn't set: a drive is
+// placed on the wall clock, so the start is worked out from how long it has gone on once the clock is
+// set. Caller holds g_drive_mutex.
+void write_drive_locked(SteadyClock::time_point now) {
+  namespace drives = commaview::drives;
+  const int64_t elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - g_drive.started_at).count();
+  if (g_drive.carried_duration_s == 0 && elapsed_s < kMinDriveSec) return;
+  const int64_t wall = wall_ms_now();
+  if (!drives::valid_wall_ms(wall)) return;
+  const bool new_file = g_drive.record_path.empty();
+  if (new_file) {
+    int64_t start = g_drive.started_wall_ms > 0 ? g_drive.started_wall_ms : wall - elapsed_s * 1000;
+    // Never another drive's file, should a clock repeat itself.
+    while (access((drive_list_dir() + "/" + drives::record_file_name(start)).c_str(), F_OK) == 0) ++start;
+    g_drive.record_start_ms = start;
+    g_drive.record_path = drive_list_dir() + "/" + drives::record_file_name(start);
+  }
+  drives::DriveRecord record;
+  record.start_ms = g_drive.record_start_ms;
+  record.end_ms = std::max(wall, record.start_ms);
+  record.duration_s = g_drive.carried_duration_s + elapsed_s;
+  record.distance_m = g_drive.carried_distance_m + std::llround(g_drive.meter.distance_m());
+  record.route = g_drive.route;
+  g_drive.last_checkpoint = now;
+  g_drive.checkpoint_distance_m = g_drive.meter.distance_m();
+  if (!drives::write_file_durable(g_drive.record_path, drives::record_json(record))) return;
+  const std::string since_path = drivelog_path(kDriveSinceFile);
+  if (new_file && !drives::parse_since(drives::read_small_file(since_path))) {
+    drives::write_file_durable(since_path, drives::since_json(record.start_ms));
+  }
+}
+
+// The drive's route is known (loggerd names it a moment after the drive starts): when a file of
+// the same route was written in the last few minutes, this is that drive carrying on. Caller holds
+// g_drive_mutex.
+void carry_on_drive_locked() {
+  if (g_drive.route.empty() || g_drive.route_checked) return;
+  g_drive.route_checked = true;
+  const auto earlier = commaview::drives::find_route(drive_list_dir(), g_drive.route);
+  if (!earlier || earlier->path == g_drive.record_path) return;
+  const int64_t wall = wall_ms_now();
+  if (!commaview::drives::valid_wall_ms(wall) || wall - earlier->record.end_ms > kDriveResumeWindowMs) return;
+  if (!g_drive.record_path.empty()) unlink(g_drive.record_path.c_str());
+  g_drive.record_path = earlier->path;
+  g_drive.record_start_ms = earlier->record.start_ms;
+  g_drive.carried_distance_m = earlier->record.distance_m;
+  g_drive.carried_duration_s = earlier->record.duration_s;
+}
+
+// The carState samples since the last call: added to the drive's distance while it goes on, and
+// the drive's file rewritten every kCheckpointIntervalSec and whenever the car comes to a stop.
+void drive_meter_step(const std::vector<commaview::road::CarSample>& samples) {
+  namespace drives = commaview::drives;
+  std::lock_guard<std::mutex> lk(g_drive_mutex);
+  if (!g_drive.driving) {
+    g_drive.meter.forget_last();
+    return;
+  }
+  for (const auto& sample : samples) {
+    g_drive.meter.add(sample.log_mono_ns, sample.v_ego);
+    g_drive.stopped = sample.standstill || sample.v_ego < drives::kStoppedMs;
+  }
+  const auto now = SteadyClock::now();
+  const auto since_write = now - g_drive.last_checkpoint;
+  const bool moved = g_drive.meter.distance_m() - g_drive.checkpoint_distance_m >= 1.0;
+  if (since_write >= drive_checkpoint_interval() ||
+      (g_drive.stopped && moved && since_write >= std::chrono::seconds(drives::kMinCheckpointGapSec))) {
+    write_drive_locked(now);
+  }
+}
+
 void drive_watch_tick() {
   std::lock_guard<std::mutex> lk(g_drive_mutex);
   const auto now = SteadyClock::now();
   if (!g_drive.started) {
     g_drive.started = true;
-    g_drive.next_totals = now + std::chrono::seconds(90);
+    g_drive.next_totals = now + test_override_ms("COMMAVIEWD_TEST_TOTALS_FIRST_MS", std::chrono::seconds(kTotalsFirstSec));
   }
   if (g_drive.script_pid > 0) {
     int status = 0;
@@ -1592,10 +1709,21 @@ void drive_watch_tick() {
       const int64_t wall = wall_ms_now();
       g_drive.started_wall_ms = wall >= kValidWallMs ? wall : 0;
       g_drive.route.clear();
+      g_drive.meter.reset();
+      g_drive.record_path.clear();
+      g_drive.record_start_ms = 0;
+      g_drive.carried_distance_m = 0;
+      g_drive.carried_duration_s = 0;
+      g_drive.route_checked = false;
+      g_drive.last_checkpoint = now;
+      g_drive.checkpoint_distance_m = 0.0;
+      g_drive.stopped = true;
+      commaview::drives::prune_drives(drive_list_dir(), wall);
     }
     // loggerd names the route a moment after the drive starts; the latest new name is this drive's.
     const std::string route = read_param("CurrentRoute");
     if (!route.empty() && route != g_drive.last_route) g_drive.route = route;
+    carry_on_drive_locked();
     if (location_sharing_enabled()) {
       if (auto fix = gps_peek_locked().latest()) {
         if (g_drive.started_wall_ms == 0 || fix->fix_ms >= g_drive.started_wall_ms - 60000) g_drive.last_fix = fix;
@@ -1605,7 +1733,6 @@ void drive_watch_tick() {
     }
   } else if (road == RoadState::kOffroad && g_drive.driving) {
     g_drive.driving = false;
-    const int64_t duration_sec = std::chrono::duration_cast<std::chrono::seconds>(now - g_drive.started_at).count();
     // Where this drive ended: the comma's last fix, kept only while location is on.
     if (g_drive.last_fix && location_sharing_enabled()) {
       mkdir(drivelog_path("data").c_str(), 0700);
@@ -1613,32 +1740,28 @@ void drive_watch_tick() {
                         comma_fix_json(*g_drive.last_fix, ",\"endedMs\":" + std::to_string(wall_ms_now())) + "\n");
     }
     g_drive.last_fix.reset();
-    if (duration_sec >= kMinDriveSec) {
-      const int64_t end_wall = wall_ms_now();
-      queue_drive_script_locked({"after-drive", "--route", g_drive.route,
-                                 "--start-ms", std::to_string(g_drive.started_wall_ms),
-                                 "--end-ms", std::to_string(end_wall >= kValidWallMs ? end_wall : 0),
-                                 "--duration-s", std::to_string(duration_sec)},
-                                after_drive_delay_sec());
-      g_drive.next_totals = now + std::chrono::seconds(kTotalsRefreshSec);
-    }
+    // The drive's last seconds, when the comma stays on long enough to see it end. Its file already
+    // holds the drive up to its last stop.
+    write_drive_locked(now);
+    g_drive.meter.forget_last();
     if (!g_drive.route.empty()) g_drive.last_route = g_drive.route;
   }
 
-  if (road == RoadState::kOffroad && now >= g_drive.next_totals) {
+  if (road != RoadState::kUnknown && now >= g_drive.next_totals) {
     queue_drive_script_locked({"totals"});
     g_drive.next_totals = now + std::chrono::seconds(kTotalsRefreshSec);
   }
 
-  // One run at a time, in order. While the car is on only the position fallback runs, so reading a
-  // drive's logs or asking comma never competes with driving; parked, a leftover position run is dropped.
+  // One run at a time, in order. While the car is on only the position fallback and comma's totals
+  // (one small request, at most every kTotalsRefreshSec) run; parked, a leftover position run is dropped.
   for (auto it = g_drive.queued.begin(); g_drive.script_pid <= 0 && it != g_drive.queued.end();) {
     const bool position_run = !it->args.empty() && it->args.front() == "position";
+    const bool runs_onroad = position_run || (!it->args.empty() && it->args.front() == "totals");
     if (road == RoadState::kOffroad && position_run) {
       it = g_drive.queued.erase(it);
       continue;
     }
-    if (now < it->not_before || (road != RoadState::kOffroad && !position_run)) {
+    if (now < it->not_before || (road != RoadState::kOffroad && !runs_onroad)) {
       ++it;
       continue;
     }
@@ -1650,11 +1773,51 @@ void drive_watch_tick() {
   }
 }
 
+// The drive list kept as one file (data/drives.json, rewritten by the after-drive script of earlier
+// runtimes) moves into the folder once: each drive its own file, and when the comma started keeping
+// them. The old file is kept aside, unread.
+void move_old_drive_list() {
+  namespace drives = commaview::drives;
+  const std::string old_path = drivelog_path(kLegacyDriveListFile);
+  if (access(old_path.c_str(), F_OK) != 0) return;
+  if (const auto old = drives::parse_legacy_ledger(drives::read_small_file(old_path, kDrivelogFileCapBytes))) {
+    for (const auto& record : old->drives) {
+      const std::string path = drive_list_dir() + "/" + drives::record_file_name(record.start_ms);
+      if (access(path.c_str(), F_OK) != 0) drives::write_file_durable(path, drives::record_json(record));
+    }
+    const std::string since_path = drivelog_path(kDriveSinceFile);
+    std::optional<int64_t> since = old->since_ms;
+    for (const auto& record : old->drives) {
+      if (!since || record.start_ms < *since) since = record.start_ms;
+    }
+    if (since && !drives::parse_since(drives::read_small_file(since_path))) {
+      drives::write_file_durable(since_path, drives::since_json(*since));
+    }
+  }
+  rename(old_path.c_str(), (old_path + ".moved").c_str());
+}
+
+// The drive watcher's thread: carState drained every kDriveMeterPollMs for the distance, the onroad
+// flag and the scripts looked at every drive_poll_ms().
 void start_drive_watcher() {
+  move_old_drive_list();
   std::thread([] {
+    commaview::ipc::QueueStreamReader car_state(msgq_dir() + "/msgq_carState");
+    std::vector<uint8_t> message;
+    std::vector<commaview::road::CarSample> samples;
+    auto next_tick = SteadyClock::now();
     while (true) {
-      drive_watch_tick();
-      std::this_thread::sleep_for(std::chrono::milliseconds(drive_poll_ms()));
+      samples.clear();
+      // A second of carState at most each time; more is a queue that was full, read on the next pass.
+      for (int i = 0; i < 1000 && car_state.try_next(&message, nullptr) == commaview::ipc::ReadStatus::kMessage; ++i) {
+        if (auto sample = commaview::road::car_sample_from_event(message.data(), message.size())) samples.push_back(*sample);
+      }
+      if (SteadyClock::now() >= next_tick) {
+        drive_watch_tick();
+        next_tick = SteadyClock::now() + std::chrono::milliseconds(drive_poll_ms());
+      }
+      drive_meter_step(samples);
+      std::this_thread::sleep_for(std::chrono::milliseconds(kDriveMeterPollMs));
     }
   }).detach();
 }
@@ -1677,21 +1840,41 @@ void request_totals_if_stale() {
 std::string drive_stats_response_json() {
   request_totals_if_stale();
   std::string current = "null";
+  std::string going_on;  // the drive's file while it goes on: "current", not yet in the ledger
   {
     std::lock_guard<std::mutex> lk(g_drive_mutex);
     if (g_drive.driving) {
-      const int64_t duration_sec = std::chrono::duration_cast<std::chrono::seconds>(SteadyClock::now() - g_drive.started_at).count();
+      const int64_t duration_sec = g_drive.carried_duration_s +
+          std::chrono::duration_cast<std::chrono::seconds>(SteadyClock::now() - g_drive.started_at).count();
       const int64_t wall = wall_ms_now();
-      const int64_t start_ms = g_drive.started_wall_ms > 0 ? g_drive.started_wall_ms : (wall >= kValidWallMs ? wall - duration_sec * 1000 : 0);
+      const int64_t start_ms = g_drive.record_start_ms > 0 ? g_drive.record_start_ms
+          : g_drive.started_wall_ms > 0 ? g_drive.started_wall_ms : (wall >= kValidWallMs ? wall - duration_sec * 1000 : 0);
       if (start_ms > 0) {
         current = "{\"startMs\":" + std::to_string(start_ms) + ",\"durationS\":" + std::to_string(duration_sec) + "}";
       }
+      going_on = g_drive.record_path;
     }
+  }
+  namespace drives = commaview::drives;
+  const auto since = drives::parse_since(drives::read_small_file(drivelog_path(kDriveSinceFile)));
+  // The drives read again only when the folder changed: phones ask every few seconds.
+  static std::mutex listed_mutex;
+  static std::string listed_signature;
+  static std::vector<drives::StoredDrive> listed;
+  std::vector<drives::StoredDrive> drive_list;
+  {
+    std::lock_guard<std::mutex> lk(listed_mutex);
+    const std::string signature = drives::folder_signature(drive_list_dir());
+    if (signature != listed_signature) {
+      listed = drives::list_drives(drive_list_dir());
+      listed_signature = signature;
+    }
+    drive_list = listed;
   }
   std::ostringstream out;
   out << "{\"ok\":true,\"onroad\":" << (road_state() == RoadState::kOnroad ? "true" : "false")
       << ",\"current\":" << current
-      << ",\"ledger\":" << embedded_json_object(drivelog_path("data/drives.json"))
+      << ",\"ledger\":" << drives::ledger_json(since, drive_list, going_on)
       << ",\"totals\":" << embedded_json_object(drivelog_path("data/drive-stats.json")) << "}";
   return out.str();
 }
@@ -1764,20 +1947,25 @@ std::string location_set_response(const std::string& body) {
 // when asked here: nothing runs in the background. The key never passes through this process except
 // to be redacted from support bundles.
 //
-// Phones ask for a statement whenever they reach the comma (at most every 15 minutes each), driving
-// or not. While the drive list, the runtime's own comma totals (data/comma-api-stats.json, whose
-// all-time distance the statement carries as commaStats) and the key are as they were, the last statement is handed back
-// unchanged from data/leaderboard-statement.json (0600, beside the counter), checked with three stat()
-// calls: no Python, no new seq. The account service answers the same statement again as a duplicate,
-// a success. The drive list only changes when a drive has ended (the after-drive script), so a
-// statement never covers a drive in progress, and a day's total in it never goes down. The comma
-// totals change only when the totals script's own request to comma answers (at most every 6 hours
-// while sunnypilot's cached copy is fresh).
+// Phones ask for a statement whenever they reach the comma (about once a minute while they can),
+// driving or not. While the drive list (data/drives/), the runtime's own comma totals
+// (data/comma-api-stats.json, whose all-time distance the statement carries as commaStats) and the key
+// are as they were, the last statement is handed back unchanged from data/leaderboard-statement.json
+// (0600, beside the counter), checked with stat() calls: no Python, no new seq. The account service
+// answers the same statement again as a duplicate, a success.
+//
+// A statement covers the drive going on too, as far as its file has it: the phone can only reach a
+// comma while the car is on, so a drive left out until it ended would only reach the board with the
+// next one. Its file changes every few seconds, so while a drive goes on a statement is signed again
+// only when it's kLeaderboardLiveResignSec old (or the key or comma totals changed). A drive's file
+// only grows, so a day's total in a statement never goes down. The comma totals change only when the
+// totals script's own request to comma answers (at most every 6 hours while sunnypilot's cached copy
+// is fresh).
 
 constexpr const char* kLeaderboardKeyFile = "data/leaderboard-key.json";
-constexpr const char* kLeaderboardDriveListFile = "data/drives.json";
 constexpr const char* kLeaderboardCommaTotalsFile = "data/comma-api-stats.json";
 constexpr const char* kLeaderboardStatementCacheFile = "data/leaderboard-statement.json";
+constexpr int kLeaderboardLiveResignSec = 5 * 60;
 constexpr int kLeaderboardScriptTimeoutSec = 20;
 // The script's exit codes (commaview_drive_stats.py, EXIT_*).
 constexpr int kLeaderboardExitBadRequest = 3;
@@ -1813,13 +2001,14 @@ bool leaderboard_answer_ok(const std::string& answer) {
   return answer.rfind("{\"ok\":true,", 0) == 0 && answer.back() == '}' && answer.find('\n') == std::string::npos;
 }
 
-// What a statement is made from, cheaply: the drive list's, the comma totals' and the key's size,
-// modification time and inode (each is replaced whole when it changes), or "none" for one that's
-// missing.
+// What a statement is made from, cheaply, as four words: the version of this line, the drive list
+// folder (each drive's name, size, modification time and inode), then the comma totals' and the
+// key's size, modification time and inode (each is replaced whole when it changes), or "none" for
+// one that's missing.
 std::string leaderboard_statement_inputs() {
   std::ostringstream out;
-  out << "v2";
-  for (const char* relative : {kLeaderboardDriveListFile, kLeaderboardCommaTotalsFile, kLeaderboardKeyFile}) {
+  out << "v3 " << commaview::drives::folder_signature(drive_list_dir());
+  for (const char* relative : {kLeaderboardCommaTotalsFile, kLeaderboardKeyFile}) {
     struct stat st {};
     if (stat(drivelog_path(relative).c_str(), &st) != 0) {
       out << " none";
@@ -1830,13 +2019,38 @@ std::string leaderboard_statement_inputs() {
   return out.str();
 }
 
-// The last statement, when it was made from these same inputs; empty otherwise.
-std::string leaderboard_cached_statement(const std::string& inputs) {
-  const std::string cached = read_file_raw(drivelog_path(kLeaderboardStatementCacheFile));
+std::vector<std::string> words_of(const std::string& line) {
+  std::vector<std::string> words;
+  std::istringstream in(line);
+  for (std::string word; in >> word;) words.push_back(word);
+  return words;
+}
+
+bool drive_going_on() {
+  std::lock_guard<std::mutex> lk(g_drive_mutex);
+  return g_drive.driving;
+}
+
+// The last statement, when it was made from these same inputs; or, while a drive goes on, when only
+// the drive list changed since and it's less than kLeaderboardLiveResignSec old. Empty otherwise.
+std::string leaderboard_cached_statement(const std::string& inputs, bool driving) {
+  const std::string cache_path = drivelog_path(kLeaderboardStatementCacheFile);
+  const std::string cached = read_file_raw(cache_path);
   const size_t newline = cached.find('\n');
-  if (newline == std::string::npos || cached.compare(0, newline, inputs) != 0) return "";
+  if (newline == std::string::npos) return "";
   const std::string answer = trim_copy(cached.substr(newline + 1));
-  return leaderboard_answer_ok(answer) ? answer : "";
+  if (!leaderboard_answer_ok(answer)) return "";
+  const std::string made_from = cached.substr(0, newline);
+  if (made_from == inputs) return answer;
+  if (!driving) return "";
+  const auto now_words = words_of(inputs);
+  const auto then_words = words_of(made_from);
+  if (now_words.size() != 4 || then_words.size() != 4 || now_words[0] != then_words[0] ||
+      now_words[2] != then_words[2] || now_words[3] != then_words[3]) {
+    return "";
+  }
+  const int64_t age_ms = wall_ms_now() - file_mtime_ms(cache_path);
+  return age_ms >= 0 && age_ms < static_cast<int64_t>(kLeaderboardLiveResignSec) * 1000 ? answer : "";
 }
 
 // Runs the script's leaderboard mode and answers with what it signed, or the contract's errors. The
@@ -1882,13 +2096,14 @@ commaview::api::HttpResponse leaderboard_register_response(const std::string& bo
 }
 
 // POST /commaview/leaderboard/statement {} -> {ok, statement, keyId, seq}: the last one again while
-// the drive list, the comma totals and the key haven't changed, else a new one (and that one kept for
-// next time).
+// the drive list, the comma totals and the key haven't changed (or, during a drive, while only the
+// drive list did and the last one is under kLeaderboardLiveResignSec old), else a new one (and that one
+// kept for next time).
 commaview::api::HttpResponse leaderboard_statement_response() {
   std::lock_guard<std::mutex> lk(g_leaderboard_mutex);
   // Taken before signing: a drive list that changes meanwhile makes the next request sign again.
   const std::string inputs = leaderboard_statement_inputs();
-  const std::string cached = leaderboard_cached_statement(inputs);
+  const std::string cached = leaderboard_cached_statement(inputs, drive_going_on());
   if (!cached.empty()) return make_json(200, cached);
   commaview::api::HttpResponse response = leaderboard_script_response_locked({"leaderboard-statement"});
   const std::string cache_path = drivelog_path(kLeaderboardStatementCacheFile);

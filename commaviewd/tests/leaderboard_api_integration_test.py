@@ -3,7 +3,8 @@
 comma"): POST /commaview/leaderboard/register and /statement answer only a paired phone, run the real
 drive stats script to sign with this comma's own key, and the key never leaves its 0600 file: not in
 an answer, the script's log, or a support bundle. While the drive list and the key are unchanged, a
-statement is the last one again, from its 0600 cache, without running the script.
+statement is the last one again, from its 0600 cache, without running the script; while a drive goes
+on, its changing file makes a new statement only every 5 minutes.
 """
 
 import base64
@@ -113,7 +114,7 @@ def main():
         wrapper.write_text(f'#!/bin/sh\necho "$1" >> "{runs}"\nexec "{sys.executable}" "{SCRIPT}" "$@"\n')
         wrapper.chmod(0o755)
         key_file = install / "data" / "leaderboard-key.json"
-        drive_list = install / "data" / "drives.json"
+        drive_dir = install / "data" / "drives"
         cache_file = install / "data" / "leaderboard-statement.json"
 
         def statement_runs():
@@ -126,7 +127,8 @@ def main():
                         COMMAVIEWD_TEST_KERNEL_LOG_FILE=str(root / "kernel.log"),
                         COMMAVIEWD_TEST_DRIVE_SCRIPT=str(wrapper), COMMAVIEW_DRIVE_ROOT=str(install),
                         COMMAVIEW_DRIVE_PARAMS_DIR=str(params),
-                        COMMAVIEW_DRIVE_DEVICE_MODEL_FILE=str(root / "devicetree-model"))
+                        COMMAVIEW_DRIVE_DEVICE_MODEL_FILE=str(root / "devicetree-model"),
+                        COMMAVIEWD_TEST_DRIVE_POLL_MS="50")
         base_env.pop("PYTHONPATH", None)
 
         # A runtime that hasn't been paired never signs.
@@ -185,7 +187,20 @@ def main():
                       {"startMs": today - 2 * day_ms + 7_200_000, "endMs": today - 2 * day_ms + 7_500_000,
                        "durationS": 300, "distanceM": 3000}]
             def write_drives(listed):
-                drive_list.write_text(json.dumps({"version": 1, "sinceMs": listed[0]["startMs"], "drives": listed}))
+                """The drive list as the drive watcher keeps it: one file per drive."""
+                drive_dir.mkdir(exist_ok=True)
+                for old in drive_dir.iterdir():
+                    old.unlink()
+                for listed_drive in listed:
+                    (drive_dir / f"{listed_drive['startMs']}.json").write_text(json.dumps(listed_drive))
+
+            def driving(expected):
+                for _ in range(100):
+                    current = request(port, "/commaview/drive-stats", "GET", TOKEN)[1]["current"]
+                    if (current is not None) == expected:
+                        return
+                    time.sleep(0.05)
+                raise AssertionError(f"the drive watcher never saw driving={expected}")
 
             write_drives(drives)
             runs_before = statement_runs()  # the "no key" answer above ran it once
@@ -209,9 +224,10 @@ def main():
             # The cache never answers without the pairing token.
             assert request(port, "/commaview/leaderboard/statement", token="wrong")[0] == 401
 
-            # A drive ended (the after-drive script rewrote the list): signed again, seq one higher.
-            write_drives(drives + [{"startMs": today - day_ms + 3_600_000, "endMs": today - day_ms + 3_900_000,
-                                    "durationS": 300, "distanceM": 2500}])
+            # Another drive (the drive watcher wrote its file): signed again, seq one higher.
+            drives = drives + [{"startMs": today - day_ms + 3_600_000, "endMs": today - day_ms + 3_900_000,
+                                "durationS": 300, "distanceM": 2500}]
+            write_drives(drives)
             status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
             assert status == 200 and statement["seq"] == 2 and statement_runs() == runs_before + 2
             payload = parts(statement["statement"])[1]
@@ -248,13 +264,42 @@ def main():
             assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (200, statement)
             assert statement_runs() == runs_before + 3
 
+            # A drive going on: its file grows every few seconds, and the statement covering it is
+            # signed again only once the last one is 5 minutes old.
+            (params / "IsOffroad").write_text("0")
+            driving(True)
+            write_drives(drives[:-1] + [dict(drives[-1], distanceM=4000, durationS=420)])
+            for _ in range(3):
+                assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (200, statement)
+            assert statement_runs() == runs_before + 3
+            aged = time.time() - 301
+            os.utime(cache_file, (aged, aged))
+            status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
+            assert status == 200 and statement["seq"] == 4 and statement_runs() == runs_before + 4
+            assert parts(statement["statement"])[1]["days"][1]["distanceM"] == 4000
+            write_drives(drives[:-1] + [dict(drives[-1], distanceM=5000, durationS=480)])
+            assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (200, statement)
+            # The comma's totals (or key) changing is signed at once, drive or not.
+            (install / "data" / "comma-api-stats.json").write_text(json.dumps(
+                {"version": 1, "source": "comma-api", "fetchedAtMs": fetched_ms + 1000,
+                 "all": {"routes": 1350, "distanceMi": 13030.0, "minutes": 26010}}))
+            status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
+            assert status == 200 and statement["seq"] == 5 and statement_runs() == runs_before + 5
+            assert parts(statement["statement"])[1]["days"][1]["distanceM"] == 5000
+            # Parked, any change is signed at once again.
+            (params / "IsOffroad").write_text("1")
+            driving(False)
+            write_drives(drives[:-1] + [dict(drives[-1], distanceM=5100, durationS=490)])
+            status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
+            assert status == 200 and statement["seq"] == 6 and statement_runs() == runs_before + 6
+
             # The key gone (an uninstall that kept the drive list): no key, as before, and no cache left.
             key_file.rename(root / "key-aside.json")
             assert request(port, "/commaview/leaderboard/statement", token=TOKEN) == (409, {"ok": False, "error": "no key"})
             assert not cache_file.exists()
             (root / "key-aside.json").rename(key_file)
             status, statement = request(port, "/commaview/leaderboard/statement", token=TOKEN)
-            assert status == 200 and statement["seq"] == 4
+            assert status == 200 and statement["seq"] == 7
 
             # Rotating makes a new key, whose counter starts again.
             status, rotated = request(port, "/commaview/leaderboard/register", token=TOKEN,
