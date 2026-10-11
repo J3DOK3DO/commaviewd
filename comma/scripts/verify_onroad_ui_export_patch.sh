@@ -225,6 +225,22 @@ remote_flavor() {
   remote="${remote%/}"
   remote="${remote%.git}"
   remote="${remote%/}"
+  # This C6-12 device has a local self-referential Git origin (/data/openpilot).
+  # Trust it ONLY when it is the exact expected checkout and its previously
+  # recorded provenance (remote, checkout and commit) matches. No general
+  # local-path allowance: otherwise arbitrary filesystem paths could be
+  # mistaken for known upstream remotes.
+  if [ "$remote" = "/data/openpilot" ] && [ "$OP_ROOT" = "/data/openpilot" ]; then
+    if [ "$(state_value ONROAD_UI_EXPORT_FLAVOR || true)" = "openpilot" ] &&
+       [ "$(state_value ONROAD_UI_EXPORT_OP_ROOT || true)" = "$OP_ROOT" ] &&
+       [ "$(state_value ONROAD_UI_EXPORT_UPSTREAM_REMOTE || true)" = "$remote" ] &&
+       [ "$(state_value ONROAD_UI_EXPORT_UPSTREAM_HEAD || true)" = "$(upstream_head)" ] &&
+       [ -n "$(upstream_head)" ]; then
+      printf '%s\n' openpilot
+      return 0
+    fi
+    return 1
+  fi
   # Reject lookalike hosts before applying upstream-provided repository aliases.
   case "$remote" in
     https://github.com/*|git@github.com:*|ssh://git@github.com/*|git://github.com/*) ;;
