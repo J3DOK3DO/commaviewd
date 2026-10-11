@@ -249,7 +249,7 @@ def transform_ui_state(ui_state_path: Path) -> bool:
     return write_lines_if_changed(ui_state_path, original, lines)
 
 
-def transform_augmented_road_view(augmented_path: Path) -> bool:
+def transform_augmented_road_view(augmented_path: Path, flavor: str = "openpilot") -> bool:
     if not augmented_path.exists():
         return False
     if not augmented_path.is_file():
@@ -269,6 +269,12 @@ def transform_augmented_road_view(augmented_path: Path) -> bool:
             f"(super()._render(self._content_rect) or super()._render(rect)), found {len(render_matches)}"
         )
     render_idx = render_matches[0]
+    starpilot_camera = flavor == "starpilot" and "DRIVER_CAM" in original and "def _camera_view(" in original
+    if starpilot_camera:
+        # Publish even in CameraView.NONE, which skips the base camera render entirely.
+        render_idx = find_single(lines, lambda line: line.strip() ==
+                                 "self._switch_stream_if_needed(ui_state.sm, camera_view)",
+                                 "StarPilot camera switch anchor")
     camera_call_count = sum(1 for line in lines if line.strip() == CAMERA_EXPORT_CALL)
     if camera_call_count == 0:
         render_indent = lines[render_idx][: line_indent(lines[render_idx])]
@@ -285,6 +291,8 @@ def transform_augmented_road_view(augmented_path: Path) -> bool:
         )
         method_indent = lines[calibration_idx][: line_indent(lines[calibration_idx])]
         body_indent = method_indent + "  "
+        camera_expression = ('"none" if self._camera_view() == CAMERA_VIEW_NONE else "driver" if self.stream_type == DRIVER_CAM else "wideRoad" if self.stream_type == WIDE_CAM else "road"'
+                             if starpilot_camera else '"wideRoad" if self.stream_type == WIDE_CAM else "road"')
         helper_block = [
             f"{method_indent}{CAMERA_EXPORT_HELPER}",
             f'{body_indent}exporter = getattr(ui_state, "_commaview_exporter", None)',
@@ -292,8 +300,9 @@ def transform_augmented_road_view(augmented_path: Path) -> bool:
             f"{body_indent}  return",
             f"{body_indent}try:",
             f"{body_indent}  exporter.set_onroad_camera(",
-            f'{body_indent}    active_camera="wideRoad" if self.stream_type == WIDE_CAM else "road",',
+            f'{body_indent}    active_camera={camera_expression},',
             f"{body_indent}    wide_camera_available=bool(WIDE_CAM in self.available_streams),",
+            *([f"{body_indent}    driver_video_frame_matrix=self._calc_frame_matrix(self._content_rect) if self.stream_type == DRIVER_CAM else None,"] if starpilot_camera else []),
             f"{body_indent}  )",
             f"{body_indent}except Exception:",
             f"{body_indent}  pass",
@@ -365,7 +374,7 @@ def git_head_text(repo: Path, rel: str) -> str | None:
         return None
 
 
-def patched_from_head(head: str, rel: str) -> str | None:
+def patched_from_head(head: str, rel: str, flavor: str = "openpilot") -> str | None:
     """What this transformer makes of HEAD's file, or None when it can't patch it."""
     import contextlib
     import io
@@ -378,13 +387,13 @@ def patched_from_head(head: str, rel: str) -> str | None:
                 if path.name == "ui_state.py":
                     transform_ui_state(path)
                 else:
-                    transform_augmented_road_view(path)
+                    transform_augmented_road_view(path, flavor)
         except SystemExit:
             return None
         return path.read_text()
 
 
-def classify_target(repo: Path, rel: str) -> str:
+def classify_target(repo: Path, rel: str, flavor: str = "openpilot") -> str:
     """How a managed file stands against openpilot's HEAD:
     clean / untracked / absent: nothing to undo; current: this transformer's patch of HEAD;
     ours: an older CommaView patch; damaged: missing, truncated or no longer compiling (a write cut
@@ -405,7 +414,7 @@ def classify_target(repo: Path, rel: str) -> str:
         return "damaged"
     if head.startswith(text):
         return "damaged"
-    if text == patched_from_head(head, rel):
+    if text == patched_from_head(head, rel, flavor):
         return "current"
     if any(marker in text for marker in COMMAVIEW_MARKERS):
         return "ours"
@@ -413,7 +422,7 @@ def classify_target(repo: Path, rel: str) -> str:
 
 
 def transform(op_root: Path, flavor: str, platform: str = "auto") -> None:
-    if flavor not in {"openpilot", "sunnypilot"}:
+    if flavor not in {"openpilot", "sunnypilot", "starpilot"}:
         fail(f"unsupported flavor: {flavor}")
     # Before anything is written.
     refuse_unsupported_platform(platform)
@@ -422,20 +431,20 @@ def transform(op_root: Path, flavor: str, platform: str = "auto") -> None:
     transform_ui_state(ui_root / "selfdrive" / "ui" / "ui_state.py")
 
     for augmented_path in augmented_paths_for_platform(ui_root, platform):
-        transform_augmented_road_view(augmented_path)
+        transform_augmented_road_view(augmented_path, flavor)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--op-root", required=True, type=Path)
-    parser.add_argument("--flavor", required=True, choices=("openpilot", "sunnypilot"))
+    parser.add_argument("--flavor", required=True, choices=("openpilot", "sunnypilot", "starpilot"))
     parser.add_argument("--platform", default="auto", choices=PLATFORM_CHOICES)
     parser.add_argument("--classify", nargs="+", metavar="REL",
                         help="print '<class> <rel>' for each file (relative to --op-root) and change nothing")
     args = parser.parse_args(argv)
     if args.classify:
         for rel in args.classify:
-            print(f"{classify_target(args.op_root, rel)} {rel}")
+            print(f"{classify_target(args.op_root, rel, args.flavor)} {rel}")
         return 0
     transform(args.op_root, args.flavor, args.platform)
     return 0

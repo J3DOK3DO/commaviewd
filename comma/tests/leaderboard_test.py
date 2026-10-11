@@ -122,7 +122,17 @@ def drive(start_iso: str, duration_s: int, distance_m: int, route=None) -> dict:
 
 
 def write_drives(lb, drives):
-  lb.write_json_atomic(lb.DRIVES_FILE, {"version": 1, "sinceMs": drives[0]["startMs"] if drives else None, "drives": drives})
+  """The drive list as the control service keeps it: one file per drive in data/drives/."""
+  folder = Path(lb.DRIVES_DIR)
+  folder.mkdir(parents=True, exist_ok=True)
+  for old in folder.iterdir():
+    old.unlink()
+  for d in drives:
+    (folder / f"{d['startMs']}.json").write_text(json.dumps(d))
+
+
+def drive_files(lb):
+  return {f.name: f.read_bytes() for f in Path(lb.DRIVES_DIR).iterdir()}
 
 
 def parts(token: str):
@@ -575,10 +585,10 @@ def test_a_statement_reads_the_drive_list_and_never_changes_it(lb):
   the_vector_comma(lb)
   drives = [drive("2026-09-30T07:15:00", 2000, 30000, "0000002a--8f1e2d3c4b")]
   write_drives(lb, drives)
-  before = Path(lb.DRIVES_FILE).read_bytes()
+  before = drive_files(lb)
   _, payload, _ = parts(lb.leaderboard_statement(ISSUED_MS)["statement"])
   assert payload["days"] == [{"day": "2026-09-30", "distanceM": 30000, "durationS": 2000, "drives": 1}]
-  assert Path(lb.DRIVES_FILE).read_bytes() == before
+  assert drive_files(lb) == before
   # Days only: no routes, no start or end times.
   assert "route" not in json.dumps(payload) and "8f1e2d3c4b" not in json.dumps(payload)
   assert str(drives[0]["startMs"]) not in json.dumps(payload)

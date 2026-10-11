@@ -312,7 +312,8 @@ def test_install_script_preserves_patch_flavor_state_and_supports_explicit_curre
     assert '"$INSTALL_DIR/config/hud-lite-patch.env"' in text
     assert "--current" in text
     assert "USE_CURRENT_RELEASE" in text
-    assert 'RELEASE_TAG="$(resolve_latest_release_tag)"' in text
+    assert 'RELEASE_TAG="$(resolve_fallback_release_tag)"' in text
+    assert 'RELEASE_TAG="v0.0.1-alpha"' not in text
     assert "--force-offroad" in text
     # Never asks openpilot to go offroad: an install asked for while driving is queued instead.
     assert 'write_param' not in text
@@ -405,8 +406,8 @@ def test_apply_patch_script_refuses_implicit_destructive_repair_and_backs_up_for
     assert 'cp -a "$backup_root"/. "$OP_ROOT"/ 2>/dev/null || true' not in text
     assert 'remote_flavor()' in text
     assert 'github.com:commaai/openpilot' in text
-    assert 'github.com:J3DOK3DO/openpilot' in text
-    assert 'github.com:firestar5683/StarPilot' in text
+    assert 'github.com:j3dok3do/openpilot' in text
+    assert 'github.com:firestar5683/starpilot' in text
     assert 'github.com:sunnypilot/sunnypilot' in text
     assert 'github.com:sunnypilot/openpilot' in text
     assert 'selfdrive/ui/mici' in text

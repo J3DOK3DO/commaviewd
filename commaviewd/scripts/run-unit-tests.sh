@@ -55,6 +55,11 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   -o "$TMP/test_net_framing"
 
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
+  "$ROOT/tests/test_stream_slot.cpp" \
+  "$ROOT/src/socket.cpp" \
+  -o "$TMP/test_stream_slot"
+
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
   "$ROOT/tests/test_runtime_mode.cpp" \
   "$ROOT/src/mode.cpp" \
   -o "$TMP/test_runtime_mode"
@@ -101,6 +106,17 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   -o "$TMP/test_source_recording_archive"
 
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
+  "$ROOT/tests/test_recording_metadata.cpp" \
+  "$ROOT/src/ui_export_socket.cpp" \
+  "$ROOT/src/source_recording_archive.cpp" \
+  -o "$TMP/test_recording_metadata"
+
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" -Wl,--wrap=write \
+  "$ROOT/tests/test_recording_marker_failure.cpp" \
+  "$ROOT/src/ui_export_socket.cpp" \
+  -o "$TMP/test_recording_marker_failure"
+
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" \
   "$ROOT/tests/test_recording_records.cpp" \
   "$ROOT/src/recording_records.cpp" \
   -o "$TMP/test_recording_records"
@@ -109,6 +125,11 @@ INC=( -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cere
   "$ROOT/tests/test_drive_retention.cpp" \
   "$ROOT/src/drive_retention.cpp" \
   -o "$TMP/test_drive_retention"
+
+"$CXX_BIN" -O2 -std=c++17 "${INC[@]}" -I"$ROOT/src" \
+  "$ROOT/tests/test_drive_ledger.cpp" \
+  "$ROOT/src/drive_ledger.cpp" \
+  -o "$TMP/test_drive_ledger"
 
 # The generated cereal sources the build step just wrote, for tests that read real events.
 CEREAL_SRCS=( "$OP_SOURCE_ROOT/cereal/gen/cpp/log.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/car.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/custom.capnp.c++" )
@@ -165,6 +186,11 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
   "$DIST_DIR/msgq-commaviewd.cc" \
   -lpthread -o "$TMP/test_msgq_header_recovery"
 
+MSGQ_ZMQ_SRCS=()
+if grep -q 'ZMQContext' "$MSGQ_ROOT_DIR/msgq/ipc.cc"; then
+  MSGQ_ZMQ_SRCS+=("$MSGQ_ROOT_DIR/msgq/impl_zmq.cc" -lzmq)
+fi
+
 # Real msgq (commaviewd's linked copy) on private queues: the encoder queues are read without a
 # reader slot, so no number of bridge restarts or reconnects can evict loggerd.
 "$CXX_BIN" -O2 -std=c++17 "${INC[@]}" -I"$ROOT/src" -I"$MSGQ_ROOT_DIR" \
@@ -174,9 +200,10 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
   "$DIST_DIR/msgq-commaviewd.cc" \
   "$MSGQ_ROOT_DIR/msgq/impl_msgq.cc" "$MSGQ_ROOT_DIR/msgq/ipc.cc" \
   "$MSGQ_ROOT_DIR/msgq/event.cc" "$MSGQ_ROOT_DIR/msgq/impl_fake.cc" \
-  -lpthread -o "$TMP/test_msgq_ring_reader"
+  "${MSGQ_ZMQ_SRCS[@]}" -lpthread -o "$TMP/test_msgq_ring_reader"
 
 "$TMP/test_net_framing"
+"$TMP/test_stream_slot"
 "$TMP/test_runtime_mode"
 "$TMP/test_control_policy"
 "$TMP/test_telemetry_policy"
@@ -185,9 +212,12 @@ MSGQ_ROOT_DIR="$OP_SOURCE_ROOT/msgq_repo"
 "$TMP/test_video_send_accounting"
 "$TMP/test_http_server_cloexec"
 "$TMP/test_ui_export_socket"
+"$TMP/test_recording_metadata"
+"$TMP/test_recording_marker_failure"
 "$TMP/test_source_recording_archive"
 "$TMP/test_recording_records"
 "$TMP/test_drive_retention"
+"$TMP/test_drive_ledger"
 "$TMP/test_msgq_header_recovery"
 "$TMP/test_msgq_ring_reader"
 "$TMP/test_gps_peek"
@@ -201,7 +231,8 @@ COMMAVIEWD_ROAD_QUEUE_TOOL="$TMP/test_road_phase" python3 "$ROOT/tests/source_ar
 python3 "$ROOT/tests/wifi_power_save_api_integration_test.py"
 python3 "$ROOT/tests/device_type_api_integration_test.py"
 COMMAVIEWD_ROAD_QUEUE_TOOL="$TMP/test_road_phase" python3 "$ROOT/tests/runtime_control_integration_test.py"
-COMMAVIEWD_GPS_QUEUE_TOOL="$TMP/test_gps_peek" python3 "$ROOT/tests/drive_stats_api_integration_test.py"
+COMMAVIEWD_GPS_QUEUE_TOOL="$TMP/test_gps_peek" COMMAVIEWD_ROAD_QUEUE_TOOL="$TMP/test_road_phase" \
+  python3 "$ROOT/tests/drive_stats_api_integration_test.py"
 python3 "$ROOT/tests/leaderboard_api_integration_test.py"
 python3 "$ROOT/tests/recording_records_api_integration_test.py"
 "$ROOT/tests/leaderboard_contract_test.sh"

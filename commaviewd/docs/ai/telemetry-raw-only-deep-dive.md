@@ -1,4 +1,6 @@
-# Telemetry Raw-Only Mode (Deep Dive)
+# Telemetry wire contract
+
+[Documentation](../../../docs/README.md) · [Telemetry overview](telemetry-raw-only-readme.md) · [Runtime reference](../../../docs/runtime-reference.md)
 
 ## Pipeline contract
 - Source: the exporter injected into the upstream UI (`comma/src/commaview_export.<flavor>.py`) builds one compact JSON payload per service. It sends each as `[u32 BE length][frame version 1][service_idx][json]` over the Unix socket `/data/commaview/run/ui-export.sock` (`COMMAVIEWD_UI_EXPORT_SOCKET` overrides it).
@@ -28,6 +30,10 @@ Index 20 is used only between the exporter and the bridge (recording recipe even
 3. Confirm per-service `emittedCount` growth in the runtime stats.
 4. Confirm the Android parser receives the expected service indexes.
 
-## Coordination rule
-- commaviewd runtime changes land first.
-- Before Android parser changes, check with Rhyno to avoid overlap with parallel UI/UX session.
+## Coordinating protocol changes
+
+The exporter, bridge policy, wire service indexes, and Android parser must agree. Describe
+the corresponding app/runtime compatibility range when changing the contract, and follow
+the [release procedure](../../../docs/releases.md) before offering the runtime to apps.
+Coordinate companion changes with the Android maintainers and keep unrelated UI work on
+its own branch.

@@ -31,18 +31,18 @@ assert_contains "git -C \"\${{ github.workspace }}/openpilot-src\" reset --hard 
 assert_contains "git -C \"\${{ github.workspace }}/openpilot-src\" clean -fdq" "$WORKFLOW" "release workflow should clean upstream tree after transformer check"
 assert_contains "Release \$TAG already exists; overwrite requires manual dispatch with allow_overwrite=true" "$WORKFLOW" "existing GitHub releases should not be overwritten unless manual dispatch explicitly allows it"
 assert_contains "promote_current:" "$WORKFLOW" "release workflow should expose explicit runtime promotion input"
-assert_contains "Promote this runtime tag to the current release after publishing assets" "$WORKFLOW" "runtime promotion input should explain the explicit promotion action"
-assert_contains "if: github.event_name == 'workflow_dispatch' && inputs.promote_current == true" "$WORKFLOW" "current-release update should require explicit manual promotion"
-assert_contains "Promote current runtime release" "$WORKFLOW" "current-release step should be named as an explicit promotion"
+assert_contains "Beta only: also promote the compatible public installer runtime" "$WORKFLOW" "runtime promotion input should explain the explicit promotion action"
+assert_contains "if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true" "$WORKFLOW" "current-release update should require explicit manual promotion"
+assert_contains "Register independent runtime release" "$WORKFLOW" "current-release step should be named as an explicit promotion"
 assert_contains "compareRuntimeTags" "$PROMOTE" "promotion script should compare runtime tags before promotion"
 assert_contains "Refusing to promote older runtime tag" "$PROMOTE" "promotion script should fail closed on runtime downgrades"
 assert_contains "allow-runtime-downgrade" "$PROMOTE" "promotion script should require an explicit downgrade override if ever needed"
-assert_contains 'args["allow-runtime-downgrade"] !== "true"' "$PROMOTE" "runtime downgrade override should be explicit"
+assert_contains 'allowRuntimeDowngrade: args["allow-runtime-downgrade"] === "true"' "$PROMOTE" "runtime downgrade override should be explicit"
 assert_contains "Checkout release control-plane scripts" "$WORKFLOW" "promotion should checkout guarded updater from main after release-tag checkout"
 assert_contains "path: release-control" "$WORKFLOW" "promotion should keep main control scripts separate from release tag workspace"
 assert_contains "node release-control/scripts/publish-current-release.mjs" "$WORKFLOW" "promotion should run guarded updater from main, not old release tag"
 assert_contains 'ref: ${{ github.event.repository.default_branch }}' "$WORKFLOW" "promotion control checkout should pin to the default branch (main)"
-assert_contains '--publish-url "$ACCOUNT_SERVICE_URLS"' "$WORKFLOW" "promotion should also publish to the account service"
+assert_contains '--publish-url "$ACCOUNT_SERVICE_URLS")' "$WORKFLOW" "promotion should also publish to the account service"
 assert_contains "publishToAccountServices" "$PROMOTE" "promotion should publish to the account services"
 assert_contains "id-token: write" "$WORKFLOW" "promotion should sign in to Google Cloud keylessly"
 assert_contains "google-github-actions/auth@v2" "$WORKFLOW" "promotion should sign in to Google Cloud keylessly"
@@ -57,7 +57,7 @@ assert_contains 'node scripts/release-version.mjs' "$WORKFLOW" "the release plan
 assert_contains 'git rev-parse "refs/tags/${FROM_TAG}^{}"' "$WORKFLOW" "a beta should be built from the chosen alpha's commit"
 assert_contains 'already exists" >&2' "$WORKFLOW" "cutting should never move an existing tag"
 assert_contains '[[ "$TAG" != *-beta ]] || PRERELEASE=--latest' "$WORKFLOW" "only a beta should be a full release"
-node --test "$REPO_ROOT/scripts/release-version.test.mjs" >/dev/null || { echo "FAIL: release-version.mjs tests" >&2; exit 1; }
+node --test "$REPO_ROOT/scripts/release-version.test.mjs" "$REPO_ROOT/scripts/publish-current-release.test.mjs" >/dev/null || { echo "FAIL: release-version.mjs tests" >&2; exit 1; }
 assert_contains "PROVENANCE_ASSETS=(" "$WORKFLOW" "release workflow should define provenance assets for upload"
 assert_contains 'REQUIRED_ASSETS=("$ASSET_TGZ" "$ASSET_SHA" "${PROVENANCE_ASSETS[@]}")' "$WORKFLOW" "release workflow should validate bundle, checksum, and provenance assets"
 assert_contains 'cd "$OUT_DIR"' "$BUILD_BUNDLE" "bundle script should enter release directory before writing checksum"
@@ -125,3 +125,50 @@ printf 'PASS: release workflow contract validates transformer gate before packag
 assert_contains "tools/release/publish-release-files.sh" "$WORKFLOW" "the release should publish its files on commaview.com"
 assert_contains "--shim comma4/install.sh" "$WORKFLOW" "the release should publish the installer shim"
 echo "PASS: release workflow publishes the release on commaview.com"
+
+assert_contains "offer_updates:" "$WORKFLOW" "runtime discovery should be independent of APK publication"
+assert_contains "min_app_version:" "$WORKFLOW" "runtime publication must declare the oldest compatible app"
+assert_contains "max_app_version:" "$WORKFLOW" "runtime publication must declare the newest compatible app"
+assert_contains "--validate-only" "$WORKFLOW" "rollout metadata must be validated before creating a tag"
+validation_line="$(grep -n 'name: Validate runtime rollout' "$WORKFLOW" | cut -d: -f1)"
+tag_line="$(grep -n 'name: Cut release tag' "$WORKFLOW" | cut -d: -f1)"
+(( validation_line < tag_line )) || { echo "FAIL: rollout validation must precede tag creation" >&2; exit 1; }
+
+ROLLOUT="$REPO_ROOT/.github/workflows/runtime-rollout.yml"
+assert_file "$ROLLOUT"
+assert_contains "Register runtime without an APK release" "$ROLLOUT" "existing runtime registration must have a dedicated workflow"
+assert_contains 'ref: ${{ github.event.repository.default_branch }}' "$ROLLOUT" "existing runtime registration should use current publication controls"
+assert_contains 'node scripts/publish-current-release.mjs' "$ROLLOUT" "existing runtime registration must share publication validation"
+assert_contains "TARGET_ENVIRONMENT:" "$ROLLOUT" "existing runtime registration should support staging verification before production"
+
+# Publication locks: only the public default's read-check-write waits, one promotion at a time per
+# environment. GitHub keeps one pending run per concurrency group and cancels the one before, so a
+# group shared by releases and rollouts dropped queued runs.
+PROMOTE_WORKFLOW="$REPO_ROOT/.github/workflows/runtime-promote.yml"
+assert_file "$PROMOTE_WORKFLOW"
+for workflow in "$WORKFLOW" "$ROLLOUT" "$PROMOTE_WORKFLOW"; do
+  if grep -Fq "commaviewd-runtime-publication" "$workflow"; then
+    echo "FAIL: $workflow must not share one publication lock between releases and rollouts" >&2
+    exit 1
+  fi
+done
+assert_contains 'group: commaviewd-release-${{ inputs.tag || (github.event_name == '"'push'"' && github.ref_name) || github.run_id }}' "$WORKFLOW" "a release should wait only for another run of the same tag, and a cut for nothing"
+if grep -Eq '^concurrency:' "$ROLLOUT"; then
+  echo "FAIL: registering an existing runtime is idempotent and must not queue behind other runs" >&2
+  exit 1
+fi
+assert_contains "workflow_call:" "$PROMOTE_WORKFLOW" "promotion should be shared by the release and rollout workflows"
+assert_contains 'group: commaviewd-public-default-${{ matrix.environment }}' "$PROMOTE_WORKFLOW" "promotion should be serialized per account environment"
+assert_contains "cancel-in-progress: false" "$PROMOTE_WORKFLOW" "a running promotion must never be cancelled"
+assert_contains '--promote-current' "$PROMOTE_WORKFLOW" "the promotion workflow should promote"
+for workflow in "$WORKFLOW" "$ROLLOUT"; do
+  assert_contains "uses: ./.github/workflows/runtime-promote.yml" "$workflow" "$workflow should promote through the serialized promotion workflow"
+  # Registration runs unlocked, so it must never move the public default itself.
+  if awk '/name: Register /{inside=1} /^  promote:/{inside=0} inside' "$workflow" | grep -Fq -- "promote-current"; then
+    echo "FAIL: $workflow registers without a lock and must leave promotion to runtime-promote.yml" >&2
+    exit 1
+  fi
+done
+assert_contains "if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true && inputs.promote_current == true" "$WORKFLOW" "a release should promote only when asked"
+assert_contains "if: inputs.promote_current" "$ROLLOUT" "a rollout should promote only when asked"
+echo "PASS: only promotion waits, per environment, and releases and rollouts never queue behind each other"

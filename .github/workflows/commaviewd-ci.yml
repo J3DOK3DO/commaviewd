@@ -17,6 +17,9 @@ on:
       - 'ci/**'
       - '.github/workflows/commaviewd-ci.yml'
       - '.github/workflows/commaviewd-verify.yml'
+      - '.github/workflows/commaviewd-release.yml'
+      - '.github/workflows/runtime-rollout.yml'
+      - '.github/workflows/runtime-promote.yml'
       - '.github/scripts/**'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -29,6 +32,9 @@ on:
       - 'ci/**'
       - '.github/workflows/commaviewd-ci.yml'
       - '.github/workflows/commaviewd-verify.yml'
+      - '.github/workflows/commaviewd-release.yml'
+      - '.github/workflows/runtime-rollout.yml'
+      - '.github/workflows/runtime-promote.yml'
       - '.github/scripts/**'
   workflow_dispatch:
 

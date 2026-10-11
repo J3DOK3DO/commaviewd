@@ -53,10 +53,11 @@ CC
 }
 write_msgq_fixture "$op_root"
 
-# The carState fields the road phase reads.
+# The carState fields the road phase and the drive watcher read.
 write_car_fixture() {
   cat > "$1/car.capnp" <<'CAPNP'
 struct CarState {
+  vEgo @1 :Float32;
   standstill @18 :Bool;
   gearShifter @14 :GearShifter;
   enum GearShifter {
@@ -287,9 +288,10 @@ expect_guard_failure many-readers 'msgq-layout:NUM_READERS' 's/NUM_READERS 15/NU
 expect_guard_failure header-order 'msgq-layout:msgq_header_t' '/uint64_t write_uid;/d' msgq_repo/msgq/msgq.h
 expect_guard_failure send-order 'msgq-ring:msgq_msg_send stores the size tag' '/__sync_synchronize();/d' msgq_repo/msgq/msgq.cc
 expect_guard_failure gear 'road-phase:CarState.gearShifter' '/gearShifter @14/d' cereal/car.capnp
+expect_guard_failure v-ego 'drive-meter:CarState.vEgo' 's/vEgo @1 :Float32;/vEgo @1 :Float64;/' cereal/car.capnp
 expect_guard_failure selfdrive-enabled 'road-phase:SelfdriveState.enabled' '/enabled @1 :Bool;/d' cereal/log.capnp
 
-echo "PASS: upstream interface guard rejects a changed msgq layout or road-phase field"
+echo "PASS: upstream interface guard rejects a changed msgq layout, road-phase or drive-meter field"
 
 nested_op_root="$tmpdir/openpilot-nested"
 nested_manifest="$tmpdir/nested-manifest.json"

@@ -75,6 +75,7 @@ ROAD_PHASE_SRC="$ROOT/src/road_phase.cpp"
 PROCESS_EVENTS_SRC="$ROOT/src/process_events.cpp"
 PROCESS_WATCH_SRC="$ROOT/src/process_watch.cpp"
 MSGQ_RING_READER_SRC="$ROOT/src/msgq_ring_reader.cpp"
+DRIVE_LEDGER_SRC="$ROOT/src/drive_ledger.cpp"
 
 HOST_OUT="$DIST_DIR/commaviewd-host"
 ARM_OUT="$DIST_DIR/commaviewd-aarch64"
@@ -123,11 +124,11 @@ for f in \
   "$RUNTIME_MODE_SRC" "$RUNTIME_BRIDGE_MODE_SRC" "$RUNTIME_CONTROL_MODE_SRC" \
   "$API_HTTP_SERVER_SRC" "$SOURCE_RECORDING_ARCHIVE_SRC" "$RECORDING_RECORDS_SRC" "$DRIVE_RETENTION_SRC" "$UI_EXPORT_SOCKET_SRC" "$GPS_PEEK_SRC" \
   "$SUPPORT_BUNDLE_SRC" "$MANAGER_STATE_PEEK_SRC" "$ROAD_PHASE_SRC" "$PROCESS_EVENTS_SRC" "$PROCESS_WATCH_SRC" \
-  "$MSGQ_RING_READER_SRC" \
+  "$MSGQ_RING_READER_SRC" "$DRIVE_LEDGER_SRC" \
   "$OP_SOURCE_ROOT/cereal/log.capnp" "$CAR_SCHEMA_PATH" "$OP_SOURCE_ROOT/cereal/services.py" \
   "$OP_SOURCE_ROOT/cereal/messaging/socketmaster.cc" \
   "$MSGQ_ROOT/msgq/event.cc" "$MSGQ_ROOT/msgq/impl_fake.cc" \
-  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/impl_zmq.cc" "$MSGQ_ROOT/msgq/ipc.cc"; do
+  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/ipc.cc"; do
   require_file "$f"
 done
 
@@ -163,16 +164,23 @@ COMMON_SRCS=(
   "$RUNTIME_MODE_SRC" "$RUNTIME_BRIDGE_MODE_SRC" "$RUNTIME_CONTROL_MODE_SRC"
   "$API_HTTP_SERVER_SRC" "$SOURCE_RECORDING_ARCHIVE_SRC" "$RECORDING_RECORDS_SRC" "$DRIVE_RETENTION_SRC" "$UI_EXPORT_SOCKET_SRC" "$GPS_PEEK_SRC"
   "$SUPPORT_BUNDLE_SRC" "$MANAGER_STATE_PEEK_SRC" "$ROAD_PHASE_SRC" "$PROCESS_EVENTS_SRC" "$PROCESS_WATCH_SRC"
-  "$MSGQ_RING_READER_SRC"
+  "$MSGQ_RING_READER_SRC" "$DRIVE_LEDGER_SRC"
   "$NET_FRAMING_SRC" "$NET_SOCKET_SRC" "$CONTROL_POLICY_SRC"
   "$VIDEO_ROUTER_SRC" "$VIDEO_TRANSPORT_POLICY_SRC" "$VIDEO_CHUNK_PROTOCOL_SRC" "$RUNTIME_VIDEO_SEND_ACCOUNTING_SRC"
   "$OP_SOURCE_ROOT/cereal/messaging/socketmaster.cc"
   "$MSGQ_SOURCE"
   "$MSGQ_ROOT/msgq/event.cc" "$MSGQ_ROOT/msgq/impl_fake.cc"
-  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/impl_zmq.cc" "$MSGQ_ROOT/msgq/ipc.cc"
+  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/ipc.cc"
   "$OP_SOURCE_ROOT/cereal/gen/cpp/log.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/car.capnp.c++"
   "$DEPRECATED_SCHEMA_CPP" "$OP_SOURCE_ROOT/cereal/gen/cpp/custom.capnp.c++"
 )
+
+# Older forks (including StarPilot) keep the ZMQ wrappers in a separate source file.
+# Current upstream removed them. Both layouts use the same installed libzmq.
+if grep -q 'ZMQContext' "$MSGQ_ROOT/msgq/ipc.cc"; then
+  require_file "$MSGQ_ROOT/msgq/impl_zmq.cc"
+  COMMON_SRCS+=("$MSGQ_ROOT/msgq/impl_zmq.cc")
+fi
 
 echo "[2/5] Building host sanity binary (x86_64)..."
 "$HOST_CXX" -O2 -std=c++17 -DCOMMAVIEW_BRIDGE_NO_MAIN \

@@ -6,26 +6,56 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 VERSION_ENV="${SCRIPT_DIR}/version.env"
-GITHUB_REPO="${COMMAVIEWD_RELEASE_REPO:-RhynoTech/commaviewd}"
-RELEASES_API_URL="${COMMAVIEWD_RELEASES_API_URL:-https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20}"
-# The runtime paired with the current CommaView app release. It describes RhynoTech/commaviewd
-# only, so another release repo skips it unless the URL is set explicitly.
+GITHUB_REPO="${COMMAVIEWD_RELEASE_REPO:-CommaView/commaviewd}"
+RELEASES_API_URL="${COMMAVIEWD_RELEASES_API_URL:-https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100}"
+# Both official names use the same release hosting, including older app/installer settings.
+OFFICIAL_REPO=0
+case "$GITHUB_REPO" in
+  CommaView/commaviewd|RhynoTech/commaviewd) OFFICIAL_REPO=1 ;;
+esac
+# The runtime paired with the current CommaView app release. Another release repo skips it
+# unless the URL is set explicitly.
 CURRENT_RELEASE_URL="${COMMAVIEWD_CURRENT_RELEASE_URL:-}"
-if [ -z "$CURRENT_RELEASE_URL" ] && [ "$GITHUB_REPO" = "RhynoTech/commaviewd" ]; then
+if [ -z "$CURRENT_RELEASE_URL" ] && [ "$OFFICIAL_REPO" = "1" ]; then
   CURRENT_RELEASE_URL="https://commaview.com/api/current-release"
 fi
-# Where RhynoTech/commaviewd's releases are published: <origin>/<tag>/ holds the tarball, its
+# Where official releases are published: <origin>/<tag>/ holds the tarball, its
 # .sha256 and the installer's companions (comma/). Not GitHub, so the repository can be private.
 RELEASES_ORIGIN=""
-if [ "$GITHUB_REPO" = "RhynoTech/commaviewd" ]; then
+if [ "$OFFICIAL_REPO" = "1" ]; then
   RELEASES_ORIGIN="${COMMAVIEWD_RELEASES_ORIGIN:-https://commaview.com/commaviewd}"
 fi
 
-resolve_latest_release_tag() {
-  curl -fsSL --retry 3 --retry-delay 1 "$RELEASES_API_URL" \
-    | tr -d '\r' \
-    | grep -m1 '"tag_name":' \
-    | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true
+# The release to use when the current-release lookup fails. For the official repository, the
+# newest public release by version: a beta (alphas are prereleases for testers), never an alpha.
+# GitHub lists releases newest-created first, alphas included, so the first isn't it. Another
+# release repository gets its newest listed release, as before. Prints nothing when the list
+# can't be read (a private repository, no network) or has no such release.
+resolve_fallback_release_tag() {
+  curl -fsSL --max-time 20 --retry 3 --retry-delay 1 "$RELEASES_API_URL" 2>/dev/null \
+    | OFFICIAL_REPO="$OFFICIAL_REPO" python3 -c '
+import json, os, re, sys
+try:
+    releases = json.load(sys.stdin)
+except ValueError:
+    releases = []
+official = os.environ.get("OFFICIAL_REPO") == "1"
+best = None
+for release in releases if isinstance(releases, list) else []:
+    tag = release.get("tag_name") if isinstance(release, dict) else None
+    if not isinstance(tag, str) or release.get("draft"):
+        continue
+    if not official:
+        print(tag)
+        break
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)-beta", tag)
+    if match and not release.get("prerelease"):
+        version = tuple(int(part) for part in match.groups())
+        if best is None or version > best[0]:
+            best = (version, tag)
+if best:
+    print(best[1])
+' 2>/dev/null || true
 }
 
 resolve_current_release_tag() {
@@ -64,12 +94,14 @@ resolve_release_inputs() {
       # not yet paired with an app release isn't installed by default.
       RELEASE_TAG="$(resolve_current_release_tag)"
       if [ -z "$RELEASE_TAG" ]; then
-        RELEASE_TAG="$(resolve_latest_release_tag)"
+        RELEASE_TAG="$(resolve_fallback_release_tag)"
       fi
     fi
   fi
   if [ -z "$RELEASE_TAG" ]; then
-    RELEASE_TAG="v0.0.1-alpha"
+    # Never a made-up release: say so, and change nothing.
+    echo "ERROR: couldn't find the release to install. The current-release lookup${CURRENT_RELEASE_URL:+ ($CURRENT_RELEASE_URL)} failed, and no public release was listed at $RELEASES_API_URL. Nothing was changed. Try again later, or name a release with --tag <tag>." >&2
+    return 1
   fi
 
   VERSION="${COMMAVIEWD_VERSION:-${VERSION:-${RELEASE_TAG#v}}}"
@@ -122,13 +154,16 @@ refuse_unsupported_device "$@"
 # --tag and --current pick the release while the arguments are parsed, so only look up the
 # default (which needs the network) when neither is given.
 default_release_needed=1
+help_requested=0
 for arg in "$@"; do
   case "$arg" in
     --tag|--current) default_release_needed=0 ;;
+    -h|--help) help_requested=1 ;;
   esac
 done
 if [ "$default_release_needed" = "1" ]; then
-  resolve_release_inputs
+  # --help still prints its usage when no release can be found.
+  resolve_release_inputs || [ "$help_requested" = "1" ] || exit 1
 fi
 
 INSTALL_DIR="/data/commaview"
@@ -191,7 +226,8 @@ Options:
 Exits 43 without changing anything on a comma 3 (tici), which CommaView doesn't support.
 
 Without --tag or --current, installs the runtime paired with the current CommaView app
-release, or the newest GitHub release if that lookup fails.
+release. If that lookup fails, it installs the newest public (beta) release listed on GitHub,
+never an alpha, and stops without changing anything when neither can be found.
 USAGE
 }
 
@@ -672,6 +708,7 @@ required_files=(
   "scripts/run_when_offroad.sh"
   "src/commaview_export.openpilot.py"
   "src/commaview_export.sunnypilot.py"
+  "src/commaview_export.starpilot.py"
   "src/commaview_drive_stats.py"
 )
 
@@ -747,6 +784,7 @@ deploy_required_scripts() {
   rm -f "$INSTALL_DIR/scripts/commaview_export_worker.py"
   copy_required_file "src/commaview_export.openpilot.py" "$INSTALL_DIR/src/commaview_export.openpilot.py" 644
   copy_required_file "src/commaview_export.sunnypilot.py" "$INSTALL_DIR/src/commaview_export.sunnypilot.py" 644
+  copy_required_file "src/commaview_export.starpilot.py" "$INSTALL_DIR/src/commaview_export.starpilot.py" 644
   copy_required_file "src/commaview_drive_stats.py" "$INSTALL_DIR/src/commaview_drive_stats.py" 644
   copy_required_file "stop.sh" "$INSTALL_DIR/stop.sh"
   copy_required_file "uninstall.sh" "$INSTALL_DIR/uninstall.sh"

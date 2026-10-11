@@ -1,141 +1,145 @@
 #!/usr/bin/env node
-/**
- * Promotes a runtime release: its tag becomes the current runtime in the account services'
- * /api/current-release (RhynoTech/commaview-web, docs/plans/app-api.md), which commaview.com serves
- * and installed apps and the comma's install.sh read. Refuses an older tag than the current one
- * unless --allow-runtime-downgrade.
- *
- *   node scripts/publish-current-release.mjs --runtime-tag v0.0.57-alpha \
- *     --publish-url https://my.commaview.com,https://my-staging.commaview.com \
- *     [--allow-runtime-downgrade] [--dry-run]
- *
- * The first address is the one checked for the current runtime (production). Needs
- * GOOGLE_ACCESS_TOKEN and RELEASE_ACCOUNT unless --dry-run: the release workflow signs in as the
- * release account keylessly (google-github-actions/auth) and passes its access token.
- */
+/** Register an independently published runtime; optionally promote a beta's public default. */
+import { pathToFileURL } from 'node:url';
 
-function usage() {
-  console.error(`Usage:
-  node scripts/publish-current-release.mjs --runtime-tag v0.0.57-alpha --publish-url https://my.commaview.com[,...] [--allow-runtime-downgrade] [--dry-run]`);
+export function releaseParts(value, prefix = '') {
+  const text = prefix ? value?.startsWith(prefix) && value.slice(prefix.length) : value;
+  const match = /^(\d+)\.(\d+)\.(\d+)-(alpha(?:\.(\d+))?|beta)$/.exec(text || '');
+  if (!match) throw new Error(`Invalid release version: ${value}`);
+  const parts = match.slice(1, 4).map(Number);
+  const build = match[4] === 'beta' ? 99 : Number(match[5] || 0);
+  if (parts.some((n) => !Number.isSafeInteger(n)) || parts[0] > 20 || parts[1] > 99 || parts[2] > 999 ||
+      (match[5] && (build < 1 || build > 98))) throw new Error(`Invalid release version: ${value}`);
+  return [...parts, build];
 }
 
-function parseArgs(argv) {
+export function compareRuntimeTags(left, right) {
+  return compareParts(releaseParts(left, 'v'), releaseParts(right, 'v'));
+}
+function compareParts(left, right) {
+  for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) return left[i] - right[i];
+  return 0;
+}
+function inRange(version, min, max) {
+  const actual = releaseParts(version);
+  return compareParts(actual, releaseParts(min)) >= 0 && compareParts(actual, releaseParts(max)) <= 0;
+}
+
+export function parseArgs(argv) {
   const out = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const key = argv[i];
-    if (!key.startsWith('--')) throw new Error(`Unexpected positional argument: ${key}`);
-    if (key === '--dry-run' || key === '--allow-runtime-downgrade') {
-      out[key.slice(2)] = 'true';
-      continue;
+  const flags = ['dry-run', 'validate-only', 'promote-current', 'allow-runtime-downgrade'];
+  const values = ['runtime-tag', 'min-app-version', 'max-app-version', 'sha256', 'publish-url'];
+  for (let i = 0; i < argv.length; i++) {
+    const key = argv[i].replace(/^--/, '');
+    if (!argv[i].startsWith('--') || (!flags.includes(key) && !values.includes(key))) throw new Error(`Unknown argument: ${argv[i]}`);
+    if (Object.hasOwn(out, key)) throw new Error(`Duplicate argument: --${key}`);
+    if (flags.includes(key)) out[key] = 'true';
+    else {
+      const value = argv[++i];
+      if (!value || value.startsWith('--')) throw new Error(`Missing value for --${key}`);
+      out[key] = value;
     }
-    const value = argv[i + 1];
-    if (!value || value.startsWith('--')) throw new Error(`Missing value for ${key}`);
-    out[key.slice(2)] = value;
-    i += 1;
   }
   return out;
 }
 
-function runtimeTagParts(tag) {
-  const match = /^v(\d+)\.(\d+)\.(\d+)-alpha$/.exec(tag);
-  if (!match) throw new Error(`Invalid runtime tag: ${tag}`);
-  return match.slice(1).map((part) => Number.parseInt(part, 10));
+export function publicationFromArgs(args) {
+  const runtimeTag = args['runtime-tag'];
+  releaseParts(runtimeTag, 'v');
+  const minAppVersion = args['min-app-version'];
+  const maxAppVersion = args['max-app-version'];
+  if (!inRange(minAppVersion, minAppVersion, maxAppVersion)) throw new Error('App compatibility bounds are reversed');
+  const sha256 = args.sha256?.toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha256 || '')) throw new Error('Give --sha256 (64 hex characters)');
+  if (args['promote-current'] === 'true' && !runtimeTag.endsWith('-beta')) throw new Error('Only a beta runtime may become the public current release');
+  if (args['allow-runtime-downgrade'] === 'true' && args['promote-current'] !== 'true') throw new Error('--allow-runtime-downgrade requires --promote-current');
+  return { runtimeTag, minAppVersion, maxAppVersion, sha256 };
 }
 
-function compareRuntimeTags(left, right) {
-  const a = runtimeTagParts(left);
-  const b = runtimeTagParts(right);
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return 0;
-}
-
-/**
- * The account services: "https://my.commaview.com", or "https://my.commaview.com|https://<service>.run.app"
- * to send requests to the service's own address (past Cloudflare, whose bot challenge stops CI)
- * while the ID token still names the public address, which the service checks.
- */
-function publishOrigins(value) {
+/** audience|direct bypasses Cloudflare without changing the OIDC audience checked by the service. */
+export function publishOrigins(value) {
   const https = (item) => {
     const url = new URL(item);
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error(`Invalid publish URL: ${item}`);
+    if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error(`Invalid publish URL: ${item}`);
     return url.origin;
   };
   return (value ?? '').split(',').map((item) => item.trim()).filter(Boolean).map((item) => {
-    const [audience, direct] = item.split('|').map((part) => part.trim());
-    return { audience: https(audience), url: https(direct || audience) };
+    const parts = item.split('|').map((part) => part.trim());
+    if (parts.length > 2 || parts.some((part) => !part)) throw new Error(`Invalid publish URL: ${item}`);
+    return { audience: https(parts[0]), url: https(parts[1] || parts[0]) };
   });
 }
 
-/** An ID token for the release account, made for an account service's address (IAM Credentials). */
-async function idToken(accessToken, account, audience) {
-  const response = await fetch(
-    `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${account}:generateIdToken`,
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audience, includeEmail: true }),
-    }
-  );
+async function idToken(fetchImpl, accessToken, account, audience) {
+  const response = await fetchImpl(`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${account}:generateIdToken`, {
+    method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audience, includeEmail: true }), signal: AbortSignal.timeout(15_000),
+  });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok || !body.token) {
-    throw new Error(`Google refused an ID token for ${audience} (${response.status}): ${body.error?.message ?? ''}`);
-  }
+  if (!response.ok || !body.token) throw new Error(`Google refused an ID token for ${audience} (${response.status})`);
   return body.token;
 }
 
-/** The runtime tag the account service serves now, or null before its first release. */
-async function currentRuntimeTag(origin) {
-  const response = await fetch(`${origin.url}/api/current-release`, { headers: { Accept: 'application/json' } });
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`GET ${origin.audience}/api/current-release failed with ${response.status}`);
-  return (await response.json()).runtimeTag ?? null;
+/** Preflight every public default before any write; alpha registration never touches the manifest. */
+export async function publishToAccountServices(origins, accessToken, account, body, options = {}) {
+  const { fetchImpl = fetch, log = console.log, promoteCurrent = false, allowRuntimeDowngrade = false } = options;
+  if (promoteCurrent) {
+    if (!body.runtimeTag.endsWith('-beta')) throw new Error('Only a beta runtime may become the public current release');
+    for (const origin of origins) {
+      const response = await fetchImpl(`${origin.url}/api/current-release`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) throw new Error(`GET ${origin.audience}/api/current-release failed with ${response.status}`);
+      const current = await response.json();
+      if (!current.appVersion || !inRange(current.appVersion, body.minAppVersion, body.maxAppVersion)) throw new Error(`Runtime is incompatible with the public app at ${origin.audience}`);
+      if (current.runtimeTag && compareRuntimeTags(body.runtimeTag, current.runtimeTag) < 0 && !allowRuntimeDowngrade) {
+        throw new Error(`Refusing to promote older runtime tag ${body.runtimeTag} over current ${current.runtimeTag}; use --allow-runtime-downgrade only for an intentional rollback`);
+      }
+    }
+  }
+  // Register everywhere first. Retrying a partial publication repeats immutable metadata safely.
+  const authorized = [];
+  for (const origin of origins) {
+    const token = await idToken(fetchImpl, accessToken, account, origin.audience);
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const response = await fetchImpl(`${origin.url}/api/runtime-releases`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`Registering runtime at ${origin.audience} failed with ${response.status}`);
+    authorized.push({ origin, headers });
+    log(`Registered runtime ${body.runtimeTag} at ${origin.audience}`);
+  }
+  if (promoteCurrent) {
+    const { runtimeTag, minAppVersion, maxAppVersion } = body;
+    for (const { origin, headers } of authorized) {
+      const response = await fetchImpl(`${origin.url}/api/current-release`, {
+        method: 'PATCH', headers, body: JSON.stringify({ runtimeTag, minAppVersion, maxAppVersion }), signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new Error(`Promoting runtime at ${origin.audience} failed with ${response.status}`);
+      log(`Promoted public runtime ${runtimeTag} at ${origin.audience}`);
+    }
+  }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const tag = args['runtime-tag'];
-  runtimeTagParts(tag ?? '');
+  const body = publicationFromArgs(args);
+  if (args['validate-only'] === 'true') return;
   const origins = publishOrigins(args['publish-url']);
   if (!origins.length) throw new Error('Give --publish-url');
-  const body = { runtimeTag: tag };
-
   if (args['dry-run'] === 'true') {
-    for (const origin of origins) console.log(`Would publish to ${origin.audience}/api/current-release (via ${origin.url}): ${JSON.stringify(body)}`);
+    for (const origin of origins) console.log(`Would register at ${origin.audience}/api/runtime-releases: ${JSON.stringify(body)}`);
+    if (args['promote-current'] === 'true') console.log('Would also promote the compatible beta public default after preflight');
     return;
   }
-
-  const current = await currentRuntimeTag(origins[0]);
-  if (current && compareRuntimeTags(tag, current) < 0 && args["allow-runtime-downgrade"] !== "true") {
-    throw new Error(`Refusing to promote older runtime tag ${tag} over current ${current}; rerun with --allow-runtime-downgrade only for an intentional rollback`);
-  }
-
   const accessToken = process.env.GOOGLE_ACCESS_TOKEN?.trim();
   const account = process.env.RELEASE_ACCOUNT?.trim();
-  if (!accessToken || !account) {
-    throw new Error('GOOGLE_ACCESS_TOKEN and RELEASE_ACCOUNT are needed (the release workflow signs in keylessly)');
-  }
-  await publishToAccountServices(origins, accessToken, account, body);
+  if (!accessToken || !account) throw new Error('GOOGLE_ACCESS_TOKEN and RELEASE_ACCOUNT are needed (the workflow signs in keylessly)');
+  await publishToAccountServices(origins, accessToken, account, body, {
+    promoteCurrent: args['promote-current'] === 'true', allowRuntimeDowngrade: args["allow-runtime-downgrade"] === "true",
+  });
 }
 
-async function publishToAccountServices(origins, accessToken, account, body) {
-  for (const origin of origins) {
-    const token = await idToken(accessToken, account, origin.audience);
-    const response = await fetch(`${origin.url}/api/current-release`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      throw new Error(`Publishing to ${origin.audience} failed with ${response.status}: ${await response.text()}`);
-    }
-    console.log(`Published runtime ${body.runtimeTag} to ${origin.audience}`);
-  }
-}
-
-main().catch((error) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
-  usage();
-  process.exit(1);
+  console.error('Usage: publish-current-release.mjs --runtime-tag vX.Y.Z-alpha.N|vX.Y.Z-beta --min-app-version X.Y.Z-alpha.N --max-app-version X.Y.Z-beta --sha256 HEX --publish-url HTTPS[,HTTPS] [--promote-current] [--dry-run]');
+  process.exitCode = 1;
 });

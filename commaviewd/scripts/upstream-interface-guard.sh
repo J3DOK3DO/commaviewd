@@ -73,6 +73,8 @@ remote="$(git -C "$OP_ROOT" remote get-url origin 2>/dev/null || true)"
 onroad_ui_export_flavor="openpilot"
 if printf '%s' "$remote" | grep -qi 'sunnypilot'; then
   onroad_ui_export_flavor="sunnypilot"
+elif printf '%s' "$remote" | grep -qiE 'firestar5683/(starpilot|openpilot)'; then
+  onroad_ui_export_flavor="starpilot"
 fi
 
 required_transformer_files=(
@@ -268,7 +270,8 @@ PY
 fi
 
 # The control API's road phase (offroad / parked / driving, src/road_phase.cpp) reads carState and
-# selfdriveState from their queues the same read-only way.
+# selfdriveState from their queues the same read-only way, and the drive watcher measures each drive
+# from carState.vEgo (src/drive_ledger.h).
 car_schema="$OP_SOURCE_ROOT/cereal/car.capnp"
 [[ -f "$car_schema" ]] || car_schema="$OP_ROOT/opendbc_repo/opendbc/car/car.capnp"
 check_file "$car_schema"
@@ -288,6 +291,8 @@ if not re.search(r'enum\s+GearShifter\s*\{\s*unknown\s+@0;\s*park\s+@1;', car):
     print('road-phase:GearShifter { unknown @0; park @1; ... }')
 if not re.search(r'\bstandstill\s+@\d+\s*:Bool;', car):
     print('road-phase:CarState.standstill :Bool')
+if not re.search(r'\bvEgo\s+@\d+\s*:Float32;', car):
+    print('drive-meter:CarState.vEgo :Float32')
 selfdrive = re.search(r'struct\s+SelfdriveState\s*\{(.*?)\n\}', log, re.S)
 if selfdrive is None or not re.search(r'\benabled\s+@\d+\s*:Bool;', selfdrive.group(1)):
     print('road-phase:SelfdriveState.enabled :Bool')

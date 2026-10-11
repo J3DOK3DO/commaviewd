@@ -29,8 +29,23 @@ on:
         required: false
         default: false
         type: boolean
+      offer_updates:
+        description: 'Register this runtime for compatible installed apps after publishing; requires both app version bounds'
+        required: false
+        default: true
+        type: boolean
+      min_app_version:
+        description: 'Oldest compatible APK version, e.g. 0.0.161-alpha.1 (inclusive)'
+        required: false
+        default: ''
+        type: string
+      max_app_version:
+        description: 'Newest compatible APK version, e.g. 0.0.161-beta (inclusive)'
+        required: false
+        default: ''
+        type: string
       promote_current:
-        description: 'Promote this runtime tag to the current release after publishing assets'
+        description: 'Beta only: also promote the compatible public installer runtime (leaves APK release unchanged)'
         required: false
         default: false
         type: boolean
@@ -41,69 +56,27 @@ permissions:
   id-token: write
 
 concurrency:
-  group: commaviewd-release-${{ github.ref }}
+  # One run per release tag, so a tag isn't built twice at once. Nothing else waits here: a cut
+  # has no tag yet and takes a group of its own (creating a tag is atomic, and a cut refuses one
+  # that exists), hosted files are create-only, and registration repeats immutable metadata.
+  # Promoting the public default is the one step that waits, per environment, and only for
+  # other promotions (runtime-promote.yml).
+  group: commaviewd-release-${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || github.run_id }}
   cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # This fork-only beta pins the tested C6-12/StarPilot artifact, rather than
-  # rebuilding against the standard Sunnypilot release source and silently
-  # changing its encoded-video queue names.
-  c612-compat-beta-publish:
-    if: github.repository == 'J3DOK3DO/commaviewd' && github.ref == 'refs/tags/v0.0.58-beta'
-    name: Publish verified StarPilot C6-12 v0.0.58-beta
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify exact tested C6-12 release bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd release/v0.0.58-beta
-          sha256sum -c commaview-comma-v0.0.58-beta.tar.gz.sha256
-          python3 - <<'PY_VERIFY'
-          import hashlib, json, tarfile
-          from pathlib import Path
-          a=Path("commaview-comma-v0.0.58-beta.tar.gz")
-          m=json.loads(Path("provenance.json").read_text())
-          prefix="commaview-comma-v0.0.58-beta/"
-          with tarfile.open(a,"r:gz") as t:
-              names=set(t.getnames())
-              required=[prefix+x for x in ("commaviewd","VERSION","version.env","install.sh","start.sh","stop.sh","lib/libcapnp-1.0.1.so","lib/libkj-1.0.1.so")]
-              assert all(n in names for n in required),[n for n in required if n not in names]
-              binary=t.extractfile(prefix+"commaviewd").read()
-              assert hashlib.sha256(binary).hexdigest()==m["tested_on_device_binary_sha256"]
-              assert m["release_tag"]=="v0.0.58-beta"
-              assert t.extractfile(prefix+"VERSION").read().strip()==b"v0.0.58-beta"
-              assert b"roadEncodeData" in binary and b"driverEncodeData" in binary
-              assert b"narrowRoadEncodeData" not in binary
-              assert binary[:4]==b"\x7fELF"
-              assert binary[18:20]==(183).to_bytes(2,"little"),"Not ARM64"
-          print("PASS: archive SHA, file structure, tested binary SHA, ARM64, C6-12 service mapping")
-          PY_VERIFY
-      - name: Publish exact verified release artifacts to this fork
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag=v0.0.58-beta
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release already exists; refusing to overwrite immutable beta artifacts." >&2
-            exit 1
-          fi
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease             --title "v0.0.58-beta - StarPilot C6-12 compatibility"             --notes-file docs/release/v0.0.58-beta-user-facing.md             release/v0.0.58-beta/commaview-comma-v0.0.58-beta.tar.gz             release/v0.0.58-beta/commaview-comma-v0.0.58-beta.tar.gz.sha256             release/v0.0.58-beta/provenance.json             release/v0.0.58-beta/c612-video-compat-source.patch
   bundle-and-publish:
     if: github.repository != 'J3DOK3DO/commaviewd' || github.ref != 'refs/tags/v0.0.58-beta'
 
     name: Build comma-device release bundle + publish assets
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      sha256: ${{ steps.register.outputs.sha256 }}
 
     steps:
       # A manual run with no tag cuts a release (docs: RhynoTech/CommaView docs/release/README.md):
@@ -112,11 +85,34 @@ jobs:
       # and the tag is created here. Tags made with the workflow's token start no other workflow,
       # so this run does the release itself.
       - name: Check out main to cut a release
-        if: github.event_name == 'workflow_dispatch' && inputs.tag == ''
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+
+      - name: Validate runtime rollout before cutting a tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OFFER_UPDATES: ${{ inputs.offer_updates }}
+          PROMOTE_CURRENT: ${{ inputs.promote_current }}
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$PROMOTE_CURRENT" == true && "$OFFER_UPDATES" != true ]]; then
+            echo "promote_current requires offer_updates" >&2
+            exit 1
+          fi
+          if [[ "$OFFER_UPDATES" == true ]]; then
+            TAG="${REQUESTED_TAG:-v0.0.0-${CHANNEL}}"
+            args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
+              --sha256 "$(printf '%064d' 0)" --validate-only)
+            [[ "$PROMOTE_CURRENT" != true ]] || args+=(--promote-current)
+            node scripts/publish-current-release.mjs "${args[@]}"
+          fi
 
       - name: Cut release tag
         id: cut
@@ -143,7 +139,10 @@ jobs:
             echo "$TAG already exists" >&2
             exit 1
           fi
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" >/dev/null
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" >/dev/null; then
+            echo "Creating $TAG failed; if another cut created it first, run this workflow again for the next tag" >&2
+            exit 1
+          fi
           echo "Created $TAG at $SHA"
 
       - name: Resolve release tag
@@ -336,18 +335,22 @@ jobs:
 
 
       - name: Checkout release control-plane scripts
-        if: github.event_name == 'workflow_dispatch' && inputs.promote_current == true
+        if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: release-control
 
-      - name: Promote current runtime release
-        if: github.event_name == 'workflow_dispatch' && inputs.promote_current == true
+      - name: Register independent runtime release
+        id: register
+        if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
           RELEASE_ACCOUNT: commaview-release@commaview.iam.gserviceaccount.com
-          # The account services' /api/current-release (RhynoTech/commaview-web, account/):
+          # Register runtime offers in both account services, independently of APK releases.
+          MIN_APP_VERSION: ${{ inputs.min_app_version }}
+          MAX_APP_VERSION: ${{ inputs.max_app_version }}
+          # Account services (RhynoTech/commaview-web, account/):
           # production (commaview.com/api/current-release) first, then staging.
           # Each service's public address (the ID token's audience) | its Cloud Run address, which
           # CI calls directly: Cloudflare's bot challenge stops GitHub's runners at the public one.
@@ -357,6 +360,75 @@ jobs:
         run: |
           set -euo pipefail
           TAG='${{ steps.vars.outputs.tag }}'
-          node release-control/scripts/publish-current-release.mjs \
-            --runtime-tag "$TAG" \
-            --publish-url "$ACCOUNT_SERVICE_URLS"
+          SHA256="$(cut -d ' ' -f1 "release/${TAG}/commaview-comma-${TAG}.tar.gz.sha256")"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          # Promotion, when asked for, is the promote job.
+          args=(--runtime-tag "$TAG" --min-app-version "$MIN_APP_VERSION" --max-app-version "$MAX_APP_VERSION"
+            --sha256 "$SHA256" --publish-url "$ACCOUNT_SERVICE_URLS")
+          node release-control/scripts/publish-current-release.mjs "${args[@]}"
+
+  promote:
+    name: Promote the public installer default
+    needs: bundle-and-publish
+    if: github.event_name == 'workflow_dispatch' && inputs.offer_updates == true && inputs.promote_current == true
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/runtime-promote.yml
+    with:
+      tag: ${{ needs.bundle-and-publish.outputs.tag }}
+      sha256: ${{ needs.bundle-and-publish.outputs.sha256 }}
+      min_app_version: ${{ inputs.min_app_version }}
+      max_app_version: ${{ inputs.max_app_version }}
+      environment: all
+
+  # This fork-only beta pins the tested C6-12/StarPilot artifact, rather than
+  # rebuilding against the standard Sunnypilot release source and silently
+  # changing its encoded-video queue names.
+  c612-compat-beta-publish:
+    if: github.repository == 'J3DOK3DO/commaviewd' && github.ref == 'refs/tags/v0.0.58-beta'
+    name: Publish verified StarPilot C6-12 v0.0.58-beta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact tested C6-12 release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release/v0.0.58-beta
+          sha256sum -c commaview-comma-v0.0.58-beta.tar.gz.sha256
+          python3 - <<'PY_VERIFY'
+          import hashlib, json, tarfile
+          from pathlib import Path
+          a=Path("commaview-comma-v0.0.58-beta.tar.gz")
+          m=json.loads(Path("provenance.json").read_text())
+          prefix="commaview-comma-v0.0.58-beta/"
+          with tarfile.open(a,"r:gz") as t:
+              names=set(t.getnames())
+              required=[prefix+x for x in ("commaviewd","VERSION","version.env","install.sh","start.sh","stop.sh","lib/libcapnp-1.0.1.so","lib/libkj-1.0.1.so")]
+              assert all(n in names for n in required),[n for n in required if n not in names]
+              binary=t.extractfile(prefix+"commaviewd").read()
+              assert hashlib.sha256(binary).hexdigest()==m["tested_on_device_binary_sha256"]
+              assert m["release_tag"]=="v0.0.58-beta"
+              assert t.extractfile(prefix+"VERSION").read().strip()==b"v0.0.58-beta"
+              assert b"roadEncodeData" in binary and b"driverEncodeData" in binary
+              assert b"narrowRoadEncodeData" not in binary
+              assert binary[:4]==b"\x7fELF"
+              assert binary[18:20]==(183).to_bytes(2,"little"),"Not ARM64"
+          print("PASS: archive SHA, file structure, tested binary SHA, ARM64, C6-12 service mapping")
+          PY_VERIFY
+      - name: Publish exact verified release artifacts to this fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v0.0.58-beta
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to overwrite immutable beta artifacts." >&2
+            exit 1
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease             --title "v0.0.58-beta - StarPilot C6-12 compatibility"             --notes-file docs/release/v0.0.58-beta-user-facing.md             release/v0.0.58-beta/commaview-comma-v0.0.58-beta.tar.gz             release/v0.0.58-beta/commaview-comma-v0.0.58-beta.tar.gz.sha256             release/v0.0.58-beta/provenance.json             release/v0.0.58-beta/c612-video-compat-source.patch

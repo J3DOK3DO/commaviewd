@@ -2,10 +2,13 @@
 
 #include <arpa/inet.h>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -91,6 +94,13 @@ int main() {
     route << "000004b4--75e1f0ba8f\n";
   }
   assert(send_frame(client_fd, 0, R"({"exportVersion":4,"speedMps":12.4,"logMonoTime":457})"));
+  // The first queued frame wakes the writer to observe the new route. Only
+  // subsequent generation-bound frames may become this drive's metadata.
+  for (int i = 0; i < 100 && server.stats().metadata_route.empty(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  assert(server.stats().metadata_route == "000004b4--75e1f0ba8f");
+  assert(send_frame(client_fd, 0, R"({"exportVersion":4,"speedMps":12.4,"logMonoTime":458})"));
 
   const auto stats = server.stats();
   assert(stats.running);
@@ -141,6 +151,37 @@ int main() {
   assert(got_snapshots);
   const std::string recipe_path = server.recipe_file_path();
 
+  // Repeated source faults are coalesced by the writer, without leaking frame contents.
+  const std::string fault_path = std::string(dir) + "/recording-faults.log";
+  const int saved_stderr = dup(STDERR_FILENO);
+  const int faults_fd = open(fault_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+  assert(saved_stderr >= 0 && faults_fd >= 0);
+  std::fflush(stderr);
+  assert(dup2(faults_fd, STDERR_FILENO) >= 0);
+  close(faults_fd);
+  const std::string oversized = "{\"privatePayloadMarker\":\"" + std::string(70000, 'x') + "\"}";
+  for (int i = 0; i < 8; ++i) assert(send_frame(client_fd, 18, oversized));
+  bool got_faults = false;
+  for (int i = 0; i < 100; ++i) {
+    std::ifstream log(fault_path);
+    std::string text((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+    if (text.find("count=8 ") != std::string::npos) {
+      assert(server.stats().snapshot_dropped == 8);
+      assert(text.find("privatePayloadMarker") == std::string::npos);
+      assert(text.find("000004b4--75e1f0ba8f") == std::string::npos);
+      size_t lines = 0;
+      for (char c : text) if (c == '\n') ++lines;
+      assert(lines == 4);  // First fault, then counts 2, 4 and 8.
+      assert(text.find("reason=snapshot_payload_too_large") != std::string::npos);
+      got_faults = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  assert(got_faults);
+  assert(dup2(saved_stderr, STDERR_FILENO) >= 0);
+  close(saved_stderr);
+
   // Offroad, CurrentRoute stays set and the comma's UI keeps exporting; the finished route's
   // snapshot must stop growing so the app can download it whole.
   const std::string offroad_param = std::string(dir) + "/IsOffroad";
@@ -157,6 +198,7 @@ int main() {
   }
   assert(snapshot_closed);
   const auto closed = server.stats();
+  assert(closed.snapshot_route.empty());
   const std::string offroad_snapshot_path = recipe_dir + "/ui-snapshot-000004b4--75e1f0ba8f.jsonl";
   std::ifstream before_file(offroad_snapshot_path, std::ios::ate | std::ios::binary);
   const auto size_before = before_file.tellg();
@@ -206,7 +248,41 @@ int main() {
     has_model |= snapshot_line.find("\"serviceIndex\":7") != std::string::npos;
   }
   assert(has_ui && has_projection && has_car && has_model);
+
+  // An existing directory where the snapshot file belongs reports the actual open error.
+  const std::string bad_route = "bad--route";
+  std::ofstream(route_file) << bad_route;
+  const std::string bad_snapshot = recipe_dir + "/ui-snapshot-" + bad_route + ".jsonl";
+  assert(mkdir(bad_snapshot.c_str(), 0700) == 0);
+  commaview::ui_export::SocketServer failing(socket_path, recipe_dir);
+  const int saved_error = dup(STDERR_FILENO);
+  const int error_fd = open(fault_path.c_str(), O_TRUNC | O_WRONLY);
+  assert(saved_error >= 0 && error_fd >= 0);
+  assert(dup2(error_fd, STDERR_FILENO) >= 0);
+  close(error_fd);
+  assert(failing.start());
+  int failing_client = -1;
+  assert(connect_unix_socket(socket_path, &failing_client));
+  assert(send_frame(failing_client, 18, R"({"camera":"road","logMonoTime":300})"));
+  for (int i = 0; i < 100 && failing.stats().snapshot_write_failures == 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  assert(failing.stats().snapshot_write_failures == 1);
+  assert(!failing.stats().snapshot_active);
+  assert(failing.stats().snapshot_route == bad_route);
+  failing.stop();  // Drains pending fault messages before the log is read.
+  close(failing_client);
+  assert(dup2(saved_error, STDERR_FILENO) >= 0);
+  close(saved_error);
+  std::ifstream failure_log(fault_path);
+  std::string failure_text((std::istreambuf_iterator<char>(failure_log)), std::istreambuf_iterator<char>());
+  assert(failure_text.find("reason=snapshot_open_failed") != std::string::npos);
+  assert(failure_text.find("errno=" + std::to_string(EISDIR)) != std::string::npos);
+  assert(failure_text.find(bad_route) == std::string::npos);
+  unlink(failing.recipe_file_path().c_str());
+  rmdir(bad_snapshot.c_str());
   unsetenv("COMMAVIEWD_CURRENT_ROUTE_FILE");
+  unlink(fault_path.c_str());
   unlink(route_file.c_str());
   unlink(recipe_path.c_str());
   unlink(snapshot_path.c_str());

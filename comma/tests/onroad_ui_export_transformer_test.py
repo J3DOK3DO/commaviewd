@@ -20,6 +20,7 @@ APPLY_SCRIPT = REPO_ROOT / "comma" / "scripts" / "apply_onroad_ui_export_patch.s
 REVERT_SCRIPT = REPO_ROOT / "comma" / "scripts" / "revert_onroad_ui_export_patch.sh"
 OPENPILOT_TEMPLATE = REPO_ROOT / "comma" / "src" / "commaview_export.openpilot.py"
 SUNNYPILOT_TEMPLATE = REPO_ROOT / "comma" / "src" / "commaview_export.sunnypilot.py"
+STARPILOT_TEMPLATE = REPO_ROOT / "comma" / "src" / "commaview_export.starpilot.py"
 
 EXPORT_IMPORT = "from openpilot.selfdrive.ui.commaview_export import _CommaViewSocketExporter, COMMAVIEW_RUNTIME_FLAVOR"
 EXPORT_INSTALL = "self._commaview_exporter = _CommaViewSocketExporter(COMMAVIEW_RUNTIME_FLAVOR)"
@@ -188,6 +189,7 @@ def export_templates():
     return [
         (OPENPILOT_TEMPLATE, "OPENPILOT"),
         (SUNNYPILOT_TEMPLATE, "SUNNYPILOT"),
+        (STARPILOT_TEMPLATE, "STARPILOT"),
     ]
 
 
@@ -702,6 +704,7 @@ def prepare_lifecycle_install_dir(tmp_path: Path, op_root: Path) -> Path:
     shutil.copy2(REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh", install_dir / "scripts" / "verify_onroad_ui_export_patch.sh")
     shutil.copy2(OPENPILOT_TEMPLATE, install_dir / "src" / "commaview_export.openpilot.py")
     shutil.copy2(SUNNYPILOT_TEMPLATE, install_dir / "src" / "commaview_export.sunnypilot.py")
+    shutil.copy2(REPO_ROOT / "comma/src/commaview_export.starpilot.py", install_dir / "src/commaview_export.starpilot.py")
     (install_dir / "config" / "onroad-ui-export-patch.env").write_text(
         f"ONROAD_UI_EXPORT_FLAVOR=openpilot\nONROAD_UI_EXPORT_OP_ROOT={op_root}\n"
     )
@@ -1305,107 +1308,6 @@ def test_revert_script_writes_backup_outside_install_tree(tmp_path):
     assert any((backup / "selfdrive" / "ui" / "ui_state.py").exists() for backup in backups)
 
 
-def test_apply_and_verify_accept_starpilot_fork_remote_as_openpilot_flavor(tmp_path):
-    op_root = write_full_augmented_tree(tmp_path)
-    init_git_repo(op_root)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/J3DOK3DO/openpilot.git"], cwd=op_root, check=True)
-    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
-
-    applied = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
-
-    assert applied.returncode == 0, applied.stderr
-    assert_ui_state_transformed(op_root / "selfdrive" / "ui" / "ui_state.py")
-    state_env = (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
-    assert "ONROAD_UI_EXPORT_FLAVOR=openpilot" in state_env
-    assert "ONROAD_UI_EXPORT_UPSTREAM_REMOTE=https://github.com/J3DOK3DO/openpilot.git" in state_env
-
-    verified = run_lifecycle_script(
-        REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh",
-        install_dir,
-        op_root,
-        "--json",
-    )
-    assert verified.returncode == 0, verified.stdout
-    status = json.loads(verified.stdout)
-    assert status["patchVerified"] is True
-    assert status["flavor"] == "openpilot"
-
-
-def test_apply_accepts_starpilot_upstream_ssh_remote_as_openpilot_flavor(tmp_path):
-    op_root = write_full_augmented_tree(tmp_path)
-    init_git_repo(op_root)
-    subprocess.run(["git", "remote", "add", "origin", "git@github.com:firestar5683/StarPilot.git"], cwd=op_root, check=True)
-    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
-
-    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
-
-    assert result.returncode == 0, result.stderr
-    assert "ONROAD_UI_EXPORT_FLAVOR=openpilot" in (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
-
-
-def test_apply_rejects_starpilot_lookalike_host(tmp_path):
-    op_root = write_full_augmented_tree(tmp_path)
-    init_git_repo(op_root)
-    subprocess.run(["git", "remote", "add", "origin", "https://evilgithub.com/J3DOK3DO/openpilot.git"], cwd=op_root, check=True)
-    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
-
-    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root)
-
-    assert result.returncode == 1
-    assert "unsupported upstream remote" in result.stderr
-
-
-def test_verify_rejects_starpilot_lookalike_host(tmp_path):
-    op_root = write_full_augmented_tree(tmp_path)
-    init_git_repo(op_root)
-    subprocess.run(["git", "remote", "add", "origin", "https://evilgithub.com/firestar5683/StarPilot.git"], cwd=op_root, check=True)
-    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
-
-    result = run_lifecycle_script(
-        REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh",
-        install_dir,
-        op_root,
-        "--json",
-    )
-
-    assert result.returncode == 1
-    assert "unsupported upstream remote" in result.stdout
-
-
-def test_apply_accepts_starpilot_remote_with_git_trailing_slash(tmp_path):
-    op_root = write_full_augmented_tree(tmp_path)
-    init_git_repo(op_root)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/J3DOK3DO/openpilot.git/"], cwd=op_root, check=True)
-    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
-
-    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
-
-    assert result.returncode == 0, result.stderr
-    assert "ONROAD_UI_EXPORT_FLAVOR=openpilot" in (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
-
-
-def test_verify_accepts_starpilot_remote_with_git_trailing_slash(tmp_path):
-    op_root = write_full_augmented_tree(tmp_path)
-    init_git_repo(op_root)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/firestar5683/StarPilot.git/"], cwd=op_root, check=True)
-    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
-
-    applied = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
-    assert applied.returncode == 0, applied.stderr
-
-    result = run_lifecycle_script(
-        REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh",
-        install_dir,
-        op_root,
-        "--json",
-    )
-
-    assert result.returncode == 0, result.stdout
-    status = json.loads(result.stdout)
-    assert status["patchVerified"] is True
-    assert status["flavor"] == "openpilot"
-
-
 def test_apply_script_accepts_sunnypilot_openpilot_remote(tmp_path):
     op_root = write_full_augmented_tree(tmp_path)
     init_git_repo(op_root)
@@ -1478,7 +1380,7 @@ def test_apply_script_rejects_unsupported_upstream_fork_even_with_state_flavor(t
 
     assert result.returncode == 1
     assert "unsupported upstream remote" in result.stderr
-    assert "validated StarPilot remotes" in result.stderr
+    assert "commaai/openpilot, sunnypilot and StarPilot" in result.stderr
 
 
 def test_verify_script_rejects_unsupported_upstream_fork_even_with_state_flavor(tmp_path):
@@ -1491,7 +1393,7 @@ def test_verify_script_rejects_unsupported_upstream_fork_even_with_state_flavor(
 
     assert result.returncode == 1
     assert "unsupported upstream remote" in result.stdout
-    assert "validated StarPilot remotes" in result.stdout
+    assert "commaai/openpilot, sunnypilot and StarPilot" in result.stdout
 
 
 def test_verify_script_fails_when_existing_flat_augmented_road_target_is_stale(tmp_path):
@@ -1587,3 +1489,86 @@ def test_verify_without_car_params_reports_no_car(tmp_path):
     verify = REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh"
     status = json.loads(run_lifecycle_script(verify, install_dir, op_root, "--json", COMMAVIEWD_TEST_PARAMS_DIR=str(tmp_path / "none")).stdout)
     assert "carFingerprint" not in status
+
+
+# installer.comma.ai/firestar5683/StarPilot clones firestar5683/openpilot, the repository's former name.
+@pytest.mark.parametrize("remote", [
+    "https://github.com/firestar5683/openpilot.git",
+    "https://github.com/firestar5683/StarPilot.git",
+    "git@github.com:firestar5683/StarPilot.git",
+    "https://github.com/Firestar5683/starpilot/",
+    "ssh://git@github.com/firestar5683/openpilot.git",
+])
+def test_apply_and_verify_starpilot_remote(tmp_path, remote):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert result.returncode == 0, result.stderr
+    assert "ONROAD_UI_EXPORT_FLAVOR=starpilot" in (install_dir / "config/onroad-ui-export-patch.env").read_text()
+    result = run_lifecycle_script(REPO_ROOT / "comma/scripts/verify_onroad_ui_export_patch.sh", install_dir, op_root, "--json")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["flavor"] == "starpilot"
+
+
+def test_apply_refuses_firestars_other_forks(tmp_path):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/firestar5683/FrogPilot.git"], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert result.returncode != 0
+    assert "unsupported upstream remote" in result.stderr
+
+
+def test_apply_and_verify_accept_c612_custom_openpilot_remote(tmp_path):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/J3DOK3DO/openpilot.git"], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+
+    applied = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert applied.returncode == 0, applied.stderr
+    assert_ui_state_transformed(op_root / "selfdrive" / "ui" / "ui_state.py")
+    state_env = (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
+    assert "ONROAD_UI_EXPORT_FLAVOR=openpilot" in state_env
+    assert "ONROAD_UI_EXPORT_UPSTREAM_REMOTE=https://github.com/J3DOK3DO/openpilot.git" in state_env
+
+    verified = run_lifecycle_script(
+        REPO_ROOT / "comma" / "scripts" / "verify_onroad_ui_export_patch.sh",
+        install_dir, op_root, "--json",
+    )
+    assert verified.returncode == 0, verified.stdout
+    status = json.loads(verified.stdout)
+    assert status["patchVerified"] is True
+    assert status["flavor"] == "openpilot"
+
+@pytest.mark.parametrize("remote", [
+    "git@github.com:J3DOK3DO/openpilot.git",
+    "ssh://git@github.com/J3DOK3DO/openpilot.git",
+])
+def test_c612_custom_ssh_remote_uses_openpilot_flavor(tmp_path, remote):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root, "--force-repair")
+    assert result.returncode == 0, result.stderr
+    assert "ONROAD_UI_EXPORT_FLAVOR=openpilot" in (install_dir / "config" / "onroad-ui-export-patch.env").read_text()
+
+
+@pytest.mark.parametrize("remote", [
+    "https://notgithub.com/J3DOK3DO/openpilot.git",
+    "git@evilgithub.com:J3DOK3DO/openpilot.git",
+    "git@evilgithub.com:firestar5683/StarPilot.git",
+    "ssh://git@evilgithub.com/firestar5683/openpilot.git",
+])
+def test_c612_custom_fork_rejects_lookalike_hosts(tmp_path, remote):
+    op_root = write_full_augmented_tree(tmp_path)
+    init_git_repo(op_root)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=op_root, check=True)
+    install_dir = prepare_lifecycle_install_dir(tmp_path, op_root)
+    result = run_lifecycle_script(APPLY_SCRIPT, install_dir, op_root)
+    assert result.returncode == 1
+    assert "unsupported upstream remote" in result.stderr

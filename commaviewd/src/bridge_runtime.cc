@@ -166,15 +166,15 @@ static const char* VIDEO_SERVICES_LIVESTREAM[] = {
 static std::atomic<bool> g_running{true};
 static bool g_livestream_video_enabled = false;
 
-static std::atomic<int> g_active_road{0};
-static std::atomic<int> g_active_wide{0};
-static std::atomic<int> g_active_driver{0};
+static commaview::net::StreamSlot g_road_slot;
+static commaview::net::StreamSlot g_wide_slot;
+static commaview::net::StreamSlot g_driver_slot;
 static std::unique_ptr<commaview::ui_export::SocketServer> g_ui_export_socket;
 
-static std::atomic<int>& active_counter_for_port(int port) {
-  if (port == PORT_ROAD) return g_active_road;
-  if (port == PORT_WIDE) return g_active_wide;
-  return g_active_driver;
+static commaview::net::StreamSlot& stream_slot_for_port(int port) {
+  if (port == PORT_ROAD) return g_road_slot;
+  if (port == PORT_WIDE) return g_wide_slot;
+  return g_driver_slot;
 }
 
 static void telemetry_loop(int client_fd,
@@ -468,6 +468,11 @@ static std::string build_runtime_stats_json_locked() {
     out << ",\"snapshotDropped\":" << socket_stats.snapshot_dropped;
     out << ",\"snapshotWriteFailures\":" << socket_stats.snapshot_write_failures;
     out << ",\"snapshotMissingRoute\":" << socket_stats.snapshot_missing_route;
+    out << ",\"metadataRoute\":\"" << socket_stats.metadata_route << "\"";
+    out << ",\"routeGeneration\":" << socket_stats.route_generation;
+    out << ",\"routeTransitionDiscarded\":" << socket_stats.route_transition_discarded;
+    out << ",\"recordingFaultsSuppressed\":" << socket_stats.recording_faults_suppressed;
+    out << ",\"metadataDamaged\":" << (socket_stats.metadata_damaged ? "true" : "false");
     out << "}";
   }
   out << "}";
@@ -767,19 +772,42 @@ static void handle_video_client(int client_fd, const char* video_service, int po
   setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
   int sndbuf = 524288;
   setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+  commaview::net::enable_dead_peer_detection(client_fd);
 
-  auto& active_counter = active_counter_for_port(port);
-  int previous = active_counter.fetch_add(1);
-  if (previous > 0) {
-    active_counter.fetch_sub(1);
+  // One client per camera. The same device reconnecting takes the camera over from its earlier
+  // connection, which notices below and ends; another device waits until the camera is free.
+  auto& slot = stream_slot_for_port(port);
+  const auto claim = slot.claim(addr_str);
+  if (claim.admission == commaview::net::StreamSlot::Admission::kBusy) {
+    append_runtime_run_event("client_rejected", video_service, addr_str, "admission", "busy");
+    printf("[%s] client rejected: %s (the camera is streaming to %s)\n",
+           video_service, addr_str, claim.holder.empty() ? "another client" : claim.holder.c_str());
+    fflush(stdout);
     close(client_fd);
     return;
   }
+  if (claim.admission == commaview::net::StreamSlot::Admission::kReplaced) {
+    printf("[%s] %s reconnected: it replaces its earlier connection\n", video_service, addr_str);
+    fflush(stdout);
+  }
+  const auto replaced = [&slot, &claim] { return !slot.holds(claim.session); };
 
   // Reads the encoder queue without a msgq reader slot (msgq_ring_reader.h): any number of client
   // reconnects and bridge restarts leave openpilot's queue, and loggerd's place in it, untouched.
   // The session starts at the newest message.
-  commaview::ipc::QueueStreamReader video_reader(commaview::ipc::msgq_queue_path(video_service));
+  // Event wire ordinals and EncodeData layouts stayed the same when upstream renamed the
+  // road/driver services to narrowRoad/cabin. StarPilot still publishes the older names.
+  const std::pair<const char*, const char*> aliases[] = {
+    {"narrowRoadEncodeData", "roadEncodeData"}, {"cabinEncodeData", "driverEncodeData"},
+    {"livestreamNarrowRoadEncodeData", "livestreamRoadEncodeData"},
+    {"livestreamCabinEncodeData", "livestreamDriverEncodeData"},
+  };
+  std::vector<std::string> alternate_queues;  // wideRoad kept its name
+  for (const auto& alias : aliases) {
+    if (std::strcmp(video_service, alias.first) == 0) alternate_queues.push_back(commaview::ipc::msgq_queue_path(alias.second));
+    if (std::strcmp(video_service, alias.second) == 0) alternate_queues.push_back(commaview::ipc::msgq_queue_path(alias.first));
+  }
+  commaview::ipc::QueueStreamReader video_reader(commaview::ipc::msgq_queue_path(video_service), alternate_queues);
   std::vector<uint8_t> raw_msg;
   uint64_t ring_discontinuities = 0;
 
@@ -1033,6 +1061,12 @@ static void handle_video_client(int client_fd, const char* video_service, int po
 
   while (g_running) {
     const auto loop_started = std::chrono::steady_clock::now();
+    if (replaced()) {
+      append_runtime_run_event("client_replaced", video_service, addr_str);
+      printf("[%s] closing %s's earlier connection: it reconnected\n", video_service, addr_str);
+      fflush(stdout);
+      break;
+    }
     if (!commaview::net::client_socket_alive(client_fd)) {
       note_runtime_peer_disconnect(video_service, "client_socket_alive", peer_closed_result());
       break;
@@ -1086,7 +1120,7 @@ static void handle_video_client(int client_fd, const char* video_service, int po
   shutdown(client_fd, SHUT_RDWR);
   if (video_sender_thread.joinable()) video_sender_thread.join();
   if (telemetry_thread.joinable()) telemetry_thread.join();
-  active_counter.fetch_sub(1);
+  slot.release(claim.session);
   close(client_fd);
 }
 
@@ -1235,6 +1269,7 @@ static void handle_telemetry_client(int client_fd) {
   setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
   int sndbuf = 524288;
   setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+  commaview::net::enable_dead_peer_detection(client_fd);
 
   note_runtime_connect();
 

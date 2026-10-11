@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = (
   (REPO_ROOT / "comma" / "src" / "commaview_export.openpilot.py", "OPENPILOT"),
   (REPO_ROOT / "comma" / "src" / "commaview_export.sunnypilot.py", "SUNNYPILOT"),
+  (REPO_ROOT / "comma" / "src" / "commaview_export.starpilot.py", "STARPILOT"),
 )
 
 WIRE_INDEXES = {
@@ -882,7 +883,7 @@ def test_car_params_carry_sunnypilot_params_only_for_sunnypilot(template, flavor
   assert onroad["alwaysOnDm"] is True
   assert "spParams" not in onroad
   assert car_params["upstreamServices"] == {}  # nothing resolved yet: publish() resolves before building
-  if flavor == "OPENPILOT":
+  if flavor != "SUNNYPILOT":
     assert "spParams" not in car_params
     assert onroad["rainbowPathEnabled"] is False
     assert ui_state.params.reads == []
@@ -996,3 +997,70 @@ def test_full_publish_of_a_sunnypilot_shaped_state_offers_every_payload(template
   assert car_params["upstreamServices"]["calibration"] == "extrinsicsCalibration"
   assert ("spParams" in car_params) == (flavor == "SUNNYPILOT")
   assert "spParams" not in exporter._pending_payload(module.COMMAVIEW_UI_STATE_ONROAD_SERVICE_INDEX)
+
+
+@pytest.mark.parametrize("camera", ["driver", "none", "road", "wideRoad"])
+def test_starpilot_camera_and_mode_snapshot(camera):
+  module = load_exporter(REPO_ROOT / "comma/src/commaview_export.starpilot.py")
+  exporter = module._CommaViewSocketExporter("STARPILOT", start_worker=False)
+  ui = FakeUiState({
+    "selfdriveState": types.SimpleNamespace(enabled=False),
+    "starpilotCarState": types.SimpleNamespace(pauseLateral=False),
+    "carState": types.SimpleNamespace(gearShifter="drive"),
+  })
+  ui.started = ui.ignition = True
+  ui.is_metric = True
+  ui.status = "disengaged"
+  ui.always_on_lateral_active = True
+  exporter.set_onroad_camera(camera, camera == "wideRoad")
+  payload = exporter._ui_state_onroad_payload(ui)
+  assert payload["runtimeFlavor"] == "STARPILOT"
+  assert payload["activeCamera"] == camera
+  assert payload["status"] == "latOnly"
+  assert payload["starpilot"]["drawRoadOverlays"] == (camera in ("road", "wideRoad"))
+  assert payload["starpilot"]["drawHudControls"] == (camera != "driver")
+  ui.sm.values["selfdriveState"].enabled = True
+  ui.sm.values["starpilotCarState"].pauseLateral = True
+  ui.always_on_lateral_active = False
+  assert exporter._ui_state_onroad_payload(ui)["status"] == "longOnly"
+  ui.sm.values["carState"].gearShifter = "reverse"
+  assert not exporter._ui_state_onroad_payload(ui)["starpilot"]["drawRoadOverlays"]
+
+
+def test_starpilot_widths_and_logging_status():
+  module = load_exporter(REPO_ROOT / "comma/src/commaview_export.starpilot.py")
+  exporter = module._CommaViewSocketExporter("STARPILOT", start_worker=False)
+  ui = FakeUiState({})
+  ui.is_metric = True
+  ui.status = "disengaged"
+  ui.always_on_lateral_active = True
+  class Params:
+    def get_bool(self, name, default=False):
+      return name in {"ModelUI", "DynamicPathWidth"}
+    def get_float(self, name, default=0):
+      return {"PathWidth": 2.0, "LaneLinesWidth": 10.0, "RoadEdgesWidth": 20.0}.get(name, default)
+  ui.ui_params = Params()
+  ui.starpilot_toggles = {"no_logging": True}
+  state = exporter._starpilot_payload(ui, "road")
+  assert state["pathHalfWidthM"] == 0.75
+  assert state["laneLineHalfWidthM"] == 0.05
+  assert state["roadEdgeHalfWidthM"] == 0.1
+  assert "Disable Logging" in state["videoDisabledReason"]
+
+
+def test_starpilot_color_failure_keeps_the_onroad_payload(monkeypatch):
+  module = load_exporter(REPO_ROOT / "comma/src/commaview_export.starpilot.py")
+  exporter = module._CommaViewSocketExporter("STARPILOT", start_worker=False)
+  status = types.ModuleType("openpilot.selfdrive.ui.lib.starpilot_status")
+  def fail(_state):
+    raise RuntimeError("capnp read failed")
+  status.get_border_color = status.get_screen_edge_color = fail
+  monkeypatch.setitem(sys.modules, "openpilot.selfdrive.ui.lib.starpilot_status", status)
+  ui = FakeUiState({})
+  ui.started = ui.ignition = True
+  ui.is_metric = True
+  ui.status = "disengaged"
+  ui.always_on_lateral_active = False
+  state = exporter._ui_state_onroad_payload(ui)["starpilot"]
+  assert state["borderColor"] == state["screenEdgeColor"] == 0xFF122839
+  assert "modeBanner" not in state  # StarPilot shows its modes only as colors
