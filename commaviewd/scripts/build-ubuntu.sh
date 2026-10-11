@@ -127,7 +127,7 @@ for f in \
   "$OP_SOURCE_ROOT/cereal/log.capnp" "$CAR_SCHEMA_PATH" "$OP_SOURCE_ROOT/cereal/services.py" \
   "$OP_SOURCE_ROOT/cereal/messaging/socketmaster.cc" \
   "$MSGQ_ROOT/msgq/event.cc" "$MSGQ_ROOT/msgq/impl_fake.cc" \
-  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/ipc.cc"; do
+  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/impl_zmq.cc" "$MSGQ_ROOT/msgq/ipc.cc"; do
   require_file "$f"
 done
 
@@ -169,13 +169,14 @@ COMMON_SRCS=(
   "$OP_SOURCE_ROOT/cereal/messaging/socketmaster.cc"
   "$MSGQ_SOURCE"
   "$MSGQ_ROOT/msgq/event.cc" "$MSGQ_ROOT/msgq/impl_fake.cc"
-  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/ipc.cc"
+  "$MSGQ_ROOT/msgq/impl_msgq.cc" "$MSGQ_ROOT/msgq/impl_zmq.cc" "$MSGQ_ROOT/msgq/ipc.cc"
   "$OP_SOURCE_ROOT/cereal/gen/cpp/log.capnp.c++" "$OP_SOURCE_ROOT/cereal/gen/cpp/car.capnp.c++"
   "$DEPRECATED_SCHEMA_CPP" "$OP_SOURCE_ROOT/cereal/gen/cpp/custom.capnp.c++"
 )
 
 echo "[2/5] Building host sanity binary (x86_64)..."
 "$HOST_CXX" -O2 -std=c++17 -DCOMMAVIEW_BRIDGE_NO_MAIN \
+  -Wl,-rpath,\$ORIGIN/lib \
   "${VIDEO_SCHEMA_FLAGS[@]}" \
   -I"$ROOT/include" -I"$OP_ROOT" -I"$OP_SOURCE_ROOT" -I"$OP_SOURCE_ROOT/cereal/gen/cpp" -I"$OP_SOURCE_ROOT/cereal/messaging" -I"$MSGQ_ROOT" \
   -o "$HOST_OUT" "${COMMON_SRCS[@]}" \

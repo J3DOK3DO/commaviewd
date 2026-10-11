@@ -1,0 +1,29 @@
+{
+  "release_tag": "v0.0.58-beta",
+  "scope": "StarPilot C6-12 video-source compatibility, not universal release",
+  "openpilot_frozen_commit": "7b4db9a26010ba9899eef242d3ca49b33cbcca9c",
+  "commaview_source_parent": "8e4fc8b5244413435420f1a490f531c25d512bbc",
+  "tested_on_device_binary_sha256": "6f86757274921d8a8ab57cd6bbeaac05961b3fb3bf79cd517252ae6c774244b0",
+  "previous_ondevice_binary_sha256": "608bf95d693e9890846a79fd7b61fdd2b725d34c9be66ba0966e5252ec389320",
+  "arch": "aarch64",
+  "video_services": [
+    "roadEncodeData",
+    "wideRoadEncodeData",
+    "driverEncodeData"
+  ],
+  "video_port": 8200,
+  "telemetry_port": 8203,
+  "control_port": 5002,
+  "validated": [
+    "isolated source build C6-12 schema",
+    "on-device runtime dependency resolution",
+    "bridge listener startup",
+    "initial Android Live View user success Oct 11 2026"
+  ],
+  "not_validated": [
+    "extended Android reliability/stress",
+    "driving-control release qualification",
+    "other openpilot forks"
+  ],
+  "rollback_on_device": "/data/commaview/backups/c612-video-compat-20261011-before/commaviewd"
+}

@@ -48,7 +48,59 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # This fork-only beta pins the tested C6-12/StarPilot artifact, rather than
+  # rebuilding against the standard Sunnypilot release source and silently
+  # changing its encoded-video queue names.
+  c612-compat-beta-publish:
+    if: github.repository == 'J3DOK3DO/commaviewd' && github.ref == 'refs/tags/v0.0.58-beta'
+    name: Publish verified StarPilot C6-12 v0.0.58-beta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact tested C6-12 release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release/v0.0.58-beta
+          sha256sum -c commaview-comma-v0.0.58-beta.tar.gz.sha256
+          python3 - <<'PY_VERIFY'
+          import hashlib, json, tarfile
+          from pathlib import Path
+          a=Path("commaview-comma-v0.0.58-beta.tar.gz")
+          m=json.loads(Path("provenance.json").read_text())
+          prefix="commaview-comma-v0.0.58-beta/"
+          with tarfile.open(a,"r:gz") as t:
+              names=set(t.getnames())
+              required=[prefix+x for x in ("commaviewd","VERSION","version.env","install.sh","start.sh","stop.sh","lib/libcapnp-1.0.1.so","lib/libkj-1.0.1.so")]
+              assert all(n in names for n in required),[n for n in required if n not in names]
+              binary=t.extractfile(prefix+"commaviewd").read()
+              assert hashlib.sha256(binary).hexdigest()==m["tested_on_device_binary_sha256"]
+              assert m["release_tag"]=="v0.0.58-beta"
+              assert t.extractfile(prefix+"VERSION").read().strip()==b"v0.0.58-beta"
+              assert b"roadEncodeData" in binary and b"driverEncodeData" in binary
+              assert b"narrowRoadEncodeData" not in binary
+              assert binary[:4]==b"\x7fELF"
+              assert binary[18:20]==(183).to_bytes(2,"little"),"Not ARM64"
+          print("PASS: archive SHA, file structure, tested binary SHA, ARM64, C6-12 service mapping")
+          PY_VERIFY
+      - name: Publish exact verified release artifacts to this fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v0.0.58-beta
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to overwrite immutable beta artifacts." >&2
+            exit 1
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease             --title "v0.0.58-beta - StarPilot C6-12 compatibility"             --notes-file docs/release/v0.0.58-beta-user-facing.md             release/v0.0.58-beta/commaview-comma-v0.0.58-beta.tar.gz             release/v0.0.58-beta/commaview-comma-v0.0.58-beta.tar.gz.sha256             release/v0.0.58-beta/provenance.json             release/v0.0.58-beta/c612-video-compat-source.patch
   bundle-and-publish:
+    if: github.repository != 'J3DOK3DO/commaviewd' || github.ref != 'refs/tags/v0.0.58-beta'
+
     name: Build comma-device release bundle + publish assets
     runs-on: ubuntu-24.04
     timeout-minutes: 90
